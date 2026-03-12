@@ -10,3 +10,9 @@ src/.venv/
 
 # macOS metadata
 .DS_Store
+
+# Local environment variables
+.env
+
+# Python bytecode caches
+__pycache__/
