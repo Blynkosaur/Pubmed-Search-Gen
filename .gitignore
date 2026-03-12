@@ -1,10 +1,12 @@
 #
-# Ignore all data files under this project, but keep Python scripts.
+# Project-specific ignores
 #
 
-# Ignore everything by default
-*
+# Data folder at project root
+data/
 
-# Keep these files
-!.gitignore
-!*.py
+# Virtual environment inside src
+src/.venv/
+
+# macOS metadata
+.DS_Store
