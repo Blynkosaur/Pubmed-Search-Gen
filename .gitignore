@@ -1,0 +1,10 @@
+#
+# Ignore all data files under this project, but keep Python scripts.
+#
+
+# Ignore everything by default
+*
+
+# Keep these files
+!.gitignore
+!*.py
