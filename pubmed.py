@@ -67,8 +67,18 @@ def _split_references_block(block: str) -> List[str]:
     Split a references block into individual reference strings.
 
     Strategy:
-    - Split on lines that look like numbered references (e.g. "1. ", "12) ").
+    - First, insert synthetic newlines before patterns like '1 Author',
+      '12 Smith' when they are not part of a larger number, so that
+      compressed reference sections like
+      'REFERENCES 1 Smith... 2 Jones...'
+      become easier to split.
+    - Then split on lines that look like numbered references
+      (e.g. "1. ", "12) ").
     """
+    # Break up compressed references where numbers and authors all sit
+    # on the same long line.
+    block = re.sub(r"(?<!\d)(\d{1,3})\s+(?=[A-Z])", r"\n\1 ", block)
+
     lines = block.splitlines()
     refs: List[str] = []
     current: List[str] = []
@@ -80,9 +90,17 @@ def _split_references_block(block: str) -> List[str]:
                 refs.append(text)
 
     for line in lines:
-        if re.match(r"^\s*\d+[\.\)]\s+", line):
-            flush_current()
-            current = [line]
+        # Allow reference numbers like "1 Title", "2. Title", or "3) Title"
+        m = re.match(r"^\s*\d+(?:[\.\)])?\s+", line)
+        if m:
+            # Heuristic: if the numbered line is just a DOI / URL tail (e.g. "44. https://doi.org/…"),
+            # treat it as a continuation of the previous reference instead of a new one.
+            rest = line[m.end() :].strip()
+            if re.match(r"^(https?://|doi\.org|10\.)", rest, re.IGNORECASE):
+                current.append(line)
+            else:
+                flush_current()
+                current = [line]
         else:
             current.append(line)
     flush_current()
