@@ -95,7 +95,13 @@ def load_included_studies(excel_path):
         if key in seen:
             continue
         seen.add(key)
-        studies.append({"doi_norm": doi_norm, "pmid": pmid, "title_norm": title_norm, "year": year})
+        studies.append({
+            "doi_norm": doi_norm,
+            "pmid": pmid,
+            "title_norm": title_norm,
+            "year": year,
+            "doi_display": str(row.get(doi_col, "") or "").strip() or doi_norm or "",
+        })
     return studies
 
 
@@ -138,16 +144,18 @@ def parse_ris_file(path):
 
 
 def parse_nbib_file(path):
-    """Parse NBIB file; yield dicts with doi_norm, pmid, title_norm per record."""
+    """Parse NBIB file; yield dicts with doi_norm, pmid, title_norm per record.
+    MEDLINE/NBIB puts DOI in LID or AID lines like 'LID - 10.1001/jama.2025.3046 [doi]', not DOI-."""
     text = path.read_text(encoding="utf-8", errors="replace")
     blocks = re.split(r"\n\s*\n", text)
+    doi_in_value = re.compile(r"(10\.\d{4,}/[^\s\[\]]+)")
     for block in blocks:
         block = block.strip()
         if not block:
             continue
         rec = {}
         for line in block.split("\n"):
-            m = re.match(r"^\s*(PMID|DOI|TI|DP)\s*-\s*(.*)$", line, re.IGNORECASE)
+            m = re.match(r"^\s*(PMID|DOI|TI|DP|LID|AID)\s*-\s*(.*)$", line, re.IGNORECASE)
             if not m:
                 continue
             tag, value = m.group(1).upper(), m.group(2).strip()
@@ -163,6 +171,11 @@ def parse_nbib_file(path):
                 y = re.match(r"(\d{4})", value)
                 if y:
                     rec["year"] = int(y.group(1))
+            elif tag in ("LID", "AID") and "[doi]" in value.lower():
+                # e.g. "10.1001/jama.2025.3046 [doi]" or "AID - 10.1016/j.jcin.2021.09.032 [doi]"
+                d = doi_in_value.search(value)
+                if d and ("doi_norm" not in rec or not rec["doi_norm"]):
+                    rec["doi_norm"] = normalize_doi(d.group(1))
         if "doi_norm" not in rec:
             rec["doi_norm"] = None
         if "pmid" not in rec:
@@ -230,17 +243,20 @@ def _matched_by_title(inc_title_norm, inc_year, by_title):
     return False
 
 
+def _is_found(s, by_doi, by_pmid, by_title):
+    """True if this included study is in the bib (by DOI, PMID, or title)."""
+    if s.get("doi_norm") and s["doi_norm"] in by_doi:
+        return True
+    if s.get("pmid") and s["pmid"] in by_pmid:
+        return True
+    if _matched_by_title(s.get("title_norm"), s.get("year"), by_title):
+        return True
+    return False
+
+
 def count_matches(included_studies, by_doi, by_pmid, by_title):
     """Count how many included studies are found in bib (DOI, PMID, or title match)."""
-    found = 0
-    for s in included_studies:
-        if s.get("doi_norm") and s["doi_norm"] in by_doi:
-            found += 1
-        elif s.get("pmid") and s["pmid"] in by_pmid:
-            found += 1
-        elif _matched_by_title(s.get("title_norm"), s.get("year"), by_title):
-            found += 1
-    return found
+    return sum(1 for s in included_studies if _is_found(s, by_doi, by_pmid, by_title))
 
 
 def main():
@@ -262,6 +278,11 @@ def main():
         "-q", "--quiet",
         action="store_true",
         help="Only print summary numbers",
+    )
+    parser.add_argument(
+        "-l", "--list",
+        action="store_true",
+        help="List which included studies were found vs not found",
     )
     args = parser.parse_args()
 
@@ -296,6 +317,15 @@ def main():
     print("Bib files used:")
     for p in args.bib_files:
         print(f"  - {p}")
+
+    if args.list:
+        print("\n--- Included studies: FOUND vs NOT FOUND ---\n")
+        for i, s in enumerate(included, 1):
+            found = _is_found(s, by_doi, by_pmid, by_title)
+            label = "FOUND" if found else "NOT FOUND"
+            doi_display = (s.get("doi_display") or s.get("doi_norm") or "").strip()
+            pmid_display = s.get("pmid") or ""
+            print(f"  {i:2}. [{label}] DOI={doi_display or '(none)'}  PMID={pmid_display or '(none)'}")
 
 
 if __name__ == "__main__":

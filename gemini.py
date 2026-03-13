@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Dict, Union
+from typing import Any, Dict, List, Union
 
 import fitz  # PyMuPDF
-import google.generativeai as genai
+from google import genai
 
 
 _MODEL_NAME = "gemini-2.5-flash"
@@ -73,7 +73,7 @@ def pico_extractor(pdf_path: Union[str, Path]) -> Dict[str, object]:
     full_text = _extract_pdf_text(pdf_path)
 
     api_key = _load_api_key()
-    genai.configure(api_key=api_key)
+    client = genai.Client(api_key=api_key)
 
     # Truncate very long texts so the prompt stays within model limits.
     max_chars = 40_000
@@ -95,18 +95,103 @@ def pico_extractor(pdf_path: Union[str, Path]) -> Dict[str, object]:
         "Return only valid JSON, no markdown backticks"
     )
 
-    model = genai.GenerativeModel(_MODEL_NAME)
-    response = model.generate_content(
-        prompt,
-        generation_config={"response_mime_type": "application/json"},
+    response = client.models.generate_content(
+        model=_MODEL_NAME,
+        contents=prompt,
+        config={"response_mime_type": "application/json"},
     )
 
-    raw_text = getattr(response, "text", None)
-    if raw_text is None:
-        # Fallback: try to coerce to string/JSON
-        parsed = json.loads(str(response))
-    else:
-        parsed = json.loads(raw_text)
-
+    raw_text = getattr(response, "text", None) or ""
+    if not raw_text.strip():
+        raw_text = str(response)
+    parsed = json.loads(raw_text)
     return parsed
+
+
+def extract_terms(
+    pico: Dict[str, Any],
+    references: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, List[str]]]:
+    """
+    Extract search terms (MeSH + freetext) for each PICO facet from reference
+    abstracts and MeSH terms, using the PICO as a guide for relevance.
+
+    - pico: dict with keys population, intervention, comparator, outcome.
+    - references: list of dicts, each with "abstract" and "mesh_terms" (list of strings).
+
+    Returns a dict with one entry per PICO facet; each value is
+    {"mesh": [...], "freetext": [...]}.
+    """
+    api_key = _load_api_key()
+    client = genai.Client(api_key=api_key)
+
+    # Build reference text: abstract + MeSH for each ref (truncate if huge).
+    ref_parts: List[str] = []
+    max_ref_chars = 80_000  # leave room for prompt + PICO + response
+    total = 0
+    for i, ref in enumerate(references):
+        abstract = (ref.get("abstract") or "").strip()
+        mesh = ref.get("mesh_terms")
+        if isinstance(mesh, list):
+            mesh_str = "; ".join(str(m) for m in mesh if m)
+        else:
+            mesh_str = str(mesh or "")
+        block = f"[Ref {i + 1}]\nAbstract: {abstract}\nMeSH: {mesh_str}\n"
+        if total + len(block) > max_ref_chars:
+            block = block[: max_ref_chars - total] + "\n... (truncated)"
+            ref_parts.append(block)
+            break
+        ref_parts.append(block)
+        total += len(block)
+
+    refs_text = "\n".join(ref_parts) if ref_parts else "(No references provided.)"
+    pico_text = json.dumps(pico, indent=2)
+
+    prompt = (
+        "You are helping build a search strategy for a systematic review.\n\n"
+        "PICO (Population, Intervention, Comparator, Outcome) from the review:\n"
+        f"{pico_text}\n\n"
+        "Below are reference abstracts and their MeSH terms from included or key papers.\n"
+        "Extract search terms that are relevant to each PICO facet. Use the PICO descriptions "
+        "to decide what is relevant. For each facet, provide:\n"
+        "- mesh: MeSH terms (or similar controlled terms) that match the facet.\n"
+        "- freetext: natural language / keyword phrases (synonyms, abbreviations, drug names, etc.).\n\n"
+        "Reference abstracts and MeSH:\n"
+        f"{refs_text}\n\n"
+        "Return a JSON object with exactly four keys: population, intervention, comparator, outcome.\n"
+        "Each value must be an object with two keys: \"mesh\" (array of strings) and \"freetext\" (array of strings).\n"
+        "Example:\n"
+        '{"population":{"mesh":["Renal Insufficiency, Chronic"],"freetext":["chronic kidney disease","CKD"]},'
+        '"intervention":{"mesh":["Sodium-Glucose Transporter 2 Inhibitors"],"freetext":["SGLT-2 inhibitors","dapagliflozin"]},'
+        '"comparator":{"mesh":[],"freetext":[]},'
+        '"outcome":{"mesh":[],"freetext":[]}}\n'
+        "Return only valid JSON, no markdown."
+    )
+
+    response = client.models.generate_content(
+        model=_MODEL_NAME,
+        contents=prompt,
+        config={"response_mime_type": "application/json"},
+    )
+
+    raw_text = getattr(response, "text", None) or ""
+    if not raw_text.strip():
+        raw_text = str(response)
+    parsed = json.loads(raw_text)
+
+    # Normalize to the expected shape (mesh + freetext lists per facet).
+    facets = ("population", "intervention", "comparator", "outcome")
+    result: Dict[str, Dict[str, List[str]]] = {}
+    for facet in facets:
+        obj = parsed.get(facet)
+        if not isinstance(obj, dict):
+            result[facet] = {"mesh": [], "freetext": []}
+            continue
+        mesh = obj.get("mesh")
+        freetext = obj.get("freetext")
+        result[facet] = {
+            "mesh": [str(x) for x in mesh] if isinstance(mesh, list) else [],
+            "freetext": [str(x) for x in freetext] if isinstance(freetext, list) else [],
+        }
+    return result
 
