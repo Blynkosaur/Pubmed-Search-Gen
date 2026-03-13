@@ -160,11 +160,13 @@ def extract_terms(
         "Extract search terms relevant to each PICO facet. For each facet provide:\n"
         "- mesh: MeSH terms (or similar controlled terms) that match the facet.\n"
         "- freetext: natural language / keyword phrases (synonyms, abbreviations, drug names, etc.).\n\n"
+        "Also provide study_design: one of randomized_controlled_trial, observational, systematic_review, or any.\n\n"
         "References (titles, abstracts, MeSH):\n"
         f"{refs_text}\n\n"
-        "Return a JSON object with exactly two keys: population, intervention.\n"
-        "Each value must be an object with two keys: \"mesh\" (array of strings) and \"freetext\" (array of strings).\n"
-        "Example: {\"population\":{\"mesh\":[\"Renal Insufficiency, Chronic\"],\"freetext\":[\"chronic kidney disease\",\"CKD\"]},"
+        "Return a JSON object with exactly three keys: study_design, population, intervention.\n"
+        "study_design must be one of: randomized_controlled_trial, observational, systematic_review, any.\n"
+        "population and intervention must each be an object with two keys: \"mesh\" (array of strings) and \"freetext\" (array of strings).\n"
+        "Example: {\"study_design\":\"randomized_controlled_trial\",\"population\":{\"mesh\":[\"Renal Insufficiency, Chronic\"],\"freetext\":[\"chronic kidney disease\",\"CKD\"]},"
         "\"intervention\":{\"mesh\":[\"Sodium-Glucose Transporter 2 Inhibitors\"],\"freetext\":[\"SGLT-2 inhibitors\",\"dapagliflozin\"]}}\n"
         "Return only valid JSON, no markdown backticks."
     )
@@ -180,9 +182,13 @@ def extract_terms(
         raw_text = str(response)
     parsed = json.loads(raw_text)
 
-    # Normalize to the expected shape (mesh + freetext lists per facet).
+    # Normalize to the expected shape (study_design + mesh + freetext lists per facet).
+    valid_designs = ("randomized_controlled_trial", "observational", "systematic_review", "any")
+    study_design = str(parsed.get("study_design") or "any").strip().lower()
+    if study_design not in valid_designs:
+        study_design = "any"
+    result: Dict[str, Any] = {"study_design": study_design}
     facets = ("population", "intervention")
-    result: Dict[str, Dict[str, List[str]]] = {}
     for facet in facets:
         obj = parsed.get(facet)
         if not isinstance(obj, dict):
@@ -275,8 +281,9 @@ def filter_extracted_terms(
         raw_text = str(response)
     parsed = json.loads(raw_text)
 
+    # Preserve study_design from input; filter only population and intervention.
+    result: Dict[str, Any] = {"study_design": terms.get("study_design", "any")}
     facets = ("population", "intervention")
-    result: Dict[str, Dict[str, List[str]]] = {}
     for facet in facets:
         obj = parsed.get(facet)
         if not isinstance(obj, dict):

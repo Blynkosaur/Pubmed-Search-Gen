@@ -7,7 +7,9 @@ from pathlib import Path
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-from gemini import pico_extractor
+from gemini import pico_extractor, extract_terms, filter_extracted_terms
+from query_builder import build_query
+from pubmed import parse as parse_pdf_references, fetch_metadata_for_identifiers
 
 
 def _ref_cache_path(pdf_path: Path) -> Path:
@@ -29,11 +31,51 @@ def run(pdf_path: Path) -> None:
     pdf_path = Path(pdf_path)
     cache_path = _ref_cache_path(pdf_path)
     if not cache_path.exists():
-        print(f"No references cache at {cache_path}. Run the pipeline once to build it.")
-        return
-    with cache_path.open("r", encoding="utf-8") as f:
-        references = json.load(f)
-    print(f"Loaded {len(references)} references from {cache_path}\n")
+        print(f"No references cache at {cache_path}. Building it from {pdf_path.name} (this may take a few minutes)...")
+
+        # 1) Parse references from the PDF
+        refs = parse_pdf_references(pdf_path)
+        if not refs:
+            print("No references could be parsed from the PDF; cannot build cache.")
+            return
+
+        # 2) Build identifiers: DOI if present, else the parsed title
+        identifiers = []
+        for r in refs:
+            ident = (getattr(r, "doi", None) or getattr(r, "title", None) or "").strip()
+            if ident:
+                identifiers.append(ident)
+
+        if not identifiers:
+            print("No DOIs or titles found in parsed references; cannot build cache.")
+            return
+
+        # 3) Fetch PubMed metadata (pmid, doi, title, abstract, mesh_terms, etc.)
+        metadata = fetch_metadata_for_identifiers(identifiers)
+
+        # 4) Normalize into reference dicts expected by downstream code
+        references = []
+        for meta, ref in zip(metadata, refs):
+            if isinstance(meta, dict) and meta:
+                # Use metadata record as-is (includes title, abstract, mesh_terms)
+                references.append(meta)
+            else:
+                # Fallback minimal record based on parsed reference
+                title = (getattr(ref, "title", None) or "").strip()
+                references.append(
+                    {
+                        "title": title,
+                        "abstract": "",
+                        "mesh_terms": [],
+                    }
+                )
+
+        cache_path.write_text(json.dumps(references, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"Wrote {len(references)} reference records to {cache_path}\n")
+    else:
+        with cache_path.open("r", encoding="utf-8") as f:
+            references = json.load(f)
+        print(f"Loaded {len(references)} references from {cache_path}\n")
 
     pico = pico_extractor(pdf_path)
     pico_text = " ".join(str(pico.get(k, "")) for k in ("population", "intervention"))
@@ -54,6 +96,14 @@ def run(pdf_path: Path) -> None:
         title = (rec.get("title") or "").strip()
         print(f"{score:.4f}  {title}")
 
+    filtered_refs = [rec for rec, _ in kept]
+    terms = extract_terms(pico, filtered_refs)
+    terms = filter_extracted_terms(terms, filtered_refs)
+    query = build_query(terms)
+    print("\nExtracted search terms (filtered):")
+    print(json.dumps(terms, indent=2))
+    print("\nPubMed query:")
+    print(query)
 
 
 def main() -> None:
