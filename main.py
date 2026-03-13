@@ -15,6 +15,7 @@ from gemini import (
     extract_terms,
     filter_terms_by_key_concepts,
     filter_extracted_terms,
+    extract_freetext_terms,
     extract_titles_from_references,
 )
 from query_builder import build_query
@@ -186,6 +187,15 @@ def run(pdf_path: Path) -> None:
     terms = extract_terms(pico, filtered_refs)
     terms = filter_terms_by_key_concepts(terms, key_concepts)
     terms = filter_extracted_terms(terms, filtered_refs)
+
+    # ── 8b) Dedicated freetext call for recall ───────────────────────────
+    print("Extracting additional freetext terms (recall-focused) …")
+    extra_freetext = extract_freetext_terms(pico, filtered_refs)
+    for facet in ("population", "intervention", "comparator", "outcome"):
+        existing = list(terms.get(facet, {}).get("freetext") or [])
+        added = extra_freetext.get(facet) or []
+        terms.setdefault(facet, {"mesh": [], "freetext": []})
+        terms[facet]["freetext"] = list(dict.fromkeys(existing + added))
 
     # ── 9) Build PubMed query ────────────────────────────────────────────
     query = build_query(terms)

@@ -377,6 +377,66 @@ def _refs_text_for_prompt(references: List[Dict[str, Any]], max_chars: int = 40_
     return "\n".join(ref_parts) if ref_parts else "(No references provided.)"
 
 
+def extract_freetext_terms(
+    pico: Dict[str, Any],
+    references: List[Dict[str, Any]],
+) -> Dict[str, List[str]]:
+    """
+    Dedicated Gemini call for recall-focused freetext only. Asks for every
+    phrase and synonym authors use in titles/abstracts for each PICO facet.
+    Returns {facet: [freetext terms]} (no MeSH). Merge with existing terms
+    and de-dupe before building the query.
+    """
+    api_key = _load_api_key()
+    client = genai.Client(api_key=api_key)
+
+    refs_text = _refs_text_for_prompt(references, max_chars=80_000)
+    pop = (pico.get("population") or "").strip()
+    interv = (pico.get("intervention") or "").strip()
+    comp = (pico.get("comparator") or "").strip()
+    outc = (pico.get("outcome") or "").strip()
+
+    prompt = (
+        "You are building a high-recall search strategy for a systematic review.\n\n"
+        "PICO from the review:\n"
+        f"Population: {pop}\nIntervention: {interv}\n"
+        f"Comparator: {comp}\nOutcome: {outc}\n\n"
+        "Below are reference titles and abstracts from included or key papers.\n"
+        "Your task: list every distinct phrase, synonym, and variant that authors use "
+        "in these texts to describe each PICO facet. Prioritize RECALL — include:\n"
+        "- Multiple ways of saying the same concept (e.g. \"risk score\", \"prognostic score\", \"prediction model\")\n"
+        "- Abbreviations and acronyms (prefer as part of a phrase, e.g. \"MELD score\", but include standalone if essential)\n"
+        "- Slight wording variants (e.g. \"heart transplant recipients\", \"patients undergoing heart transplantation\")\n"
+        "Prefer phrases of 2 or more words where possible. Include both general category terms and specific named tools.\n\n"
+        "Return a JSON object with exactly four keys: population, intervention, comparator, outcome.\n"
+        "Each value must be an array of strings (freetext terms only; no MeSH).\n"
+        "If a facet is not applicable, use an empty array.\n\n"
+        "References (titles and abstracts):\n"
+        f"{refs_text}\n\n"
+        "Return only valid JSON, no markdown backticks."
+    )
+
+    response = client.models.generate_content(
+        model=_MODEL_NAME,
+        contents=prompt,
+        config={"response_mime_type": "application/json"},
+    )
+
+    raw_text = getattr(response, "text", None) or ""
+    if not raw_text.strip():
+        raw_text = str(response)
+    parsed = json.loads(raw_text)
+
+    result: Dict[str, List[str]] = {}
+    for facet in _PICO_FACETS:
+        arr = parsed.get(facet)
+        if isinstance(arr, list):
+            result[facet] = [str(x).strip() for x in arr if x and str(x).strip()]
+        else:
+            result[facet] = []
+    return result
+
+
 def filter_extracted_terms(
     terms: Dict[str, Dict[str, List[str]]],
     references: List[Dict[str, Any]],
