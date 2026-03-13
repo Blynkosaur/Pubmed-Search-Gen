@@ -7,7 +7,13 @@ from pathlib import Path
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-from gemini import pico_extractor, extract_terms, filter_extracted_terms
+from gemini import (
+    pico_extractor,
+    get_pico_keywords,
+    extract_terms,
+    filter_terms_by_key_concepts,
+    filter_extracted_terms,
+)
 from query_builder import build_query
 from pubmed import parse as parse_pdf_references, fetch_metadata_for_identifiers
 
@@ -78,6 +84,7 @@ def run(pdf_path: Path) -> None:
         print(f"Loaded {len(references)} references from {cache_path}\n")
 
     pico = pico_extractor(pdf_path)
+    key_concepts = get_pico_keywords(pico)
     pico_text = " ".join(str(pico.get(k, "")) for k in ("population", "intervention"))
     ref_docs = [_doc_for_ref(r) for r in references]
     docs = [pico_text] + ref_docs
@@ -91,6 +98,9 @@ def run(pdf_path: Path) -> None:
     print("PICO:")
     for key in ("population", "intervention"):
         print(f"  {key}: {pico.get(key, '')}")
+    print("Key concepts (3 per facet):")
+    for key in ("population", "intervention"):
+        print(f"  {key}: {key_concepts.get(key, [])}")
     print(f"\nReferences with TF-IDF score >= {THRESHOLD}: {len(kept)} of {len(references)}\n")
     for rec, score in kept:
         title = (rec.get("title") or "").strip()
@@ -98,6 +108,7 @@ def run(pdf_path: Path) -> None:
 
     filtered_refs = [rec for rec, _ in kept]
     terms = extract_terms(pico, filtered_refs)
+    terms = filter_terms_by_key_concepts(terms, key_concepts)
     terms = filter_extracted_terms(terms, filtered_refs)
     query = build_query(terms)
     print("\nExtracted search terms (filtered):")

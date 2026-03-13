@@ -106,6 +106,68 @@ def pico_extractor(pdf_path: Union[str, Path]) -> Dict[str, object]:
     return parsed
 
 
+def get_pico_keywords(pico: Dict[str, Any]) -> Dict[str, List[str]]:
+    """
+    Ask Gemini for exactly three keywords that describe the population and
+    three that describe the intervention. Used to filter terms to key concepts.
+    Returns {"population": ["kw1", "kw2", "kw3"], "intervention": ["kw1", "kw2", "kw3"]}.
+    """
+    api_key = _load_api_key()
+    client = genai.Client(api_key=api_key)
+
+    pop = (pico.get("population") or "").strip()
+    interv = (pico.get("intervention") or "").strip()
+
+    prompt = (
+        "You are helping build a concise search strategy for a systematic review.\n\n"
+        "PICO:\n"
+        f"Population: {pop}\n"
+        f"Intervention: {interv}\n\n"
+        "Give exactly three keywords or short phrases that best capture the population (who the patients are), "
+        "and exactly three that best capture the intervention (what is being done). "
+        "Use the most specific, searchable terms.\n\n"
+        "Return a JSON object with exactly two keys: population, intervention.\n"
+        "Each value must be an array of exactly three strings.\n"
+        'Example: {"population":["coronary heart disease","myocardial infarction","acute coronary syndrome"],'
+        '"intervention":["telemedicine","remote monitoring","cardiac rehabilitation"]}\n'
+        "Return only valid JSON, no markdown backticks."
+    )
+
+    response = client.models.generate_content(
+        model=_MODEL_NAME,
+        contents=prompt,
+        config={"response_mime_type": "application/json"},
+    )
+
+    raw_text = getattr(response, "text", None) or ""
+    if not raw_text.strip():
+        raw_text = str(response)
+    parsed = json.loads(raw_text)
+
+    result: Dict[str, List[str]] = {}
+    for facet in ("population", "intervention"):
+        arr = parsed.get(facet)
+        if isinstance(arr, list) and len(arr) >= 3:
+            result[facet] = [
+                str(arr[0]).strip(),
+                str(arr[1]).strip(),
+                str(arr[2]).strip(),
+            ]
+        elif isinstance(arr, list) and len(arr) == 2:
+            # Duplicate the second term to keep three total
+            result[facet] = [
+                str(arr[0]).strip(),
+                str(arr[1]).strip(),
+                str(arr[1]).strip(),
+            ]
+        elif isinstance(arr, list) and len(arr) == 1:
+            v = str(arr[0]).strip()
+            result[facet] = [v, v, v]
+        else:
+            result[facet] = []
+    return result
+
+
 def extract_terms(
     pico: Dict[str, Any],
     references: List[Dict[str, Any]],
@@ -200,6 +262,67 @@ def extract_terms(
             "mesh": [str(x) for x in mesh] if isinstance(mesh, list) else [],
             "freetext": [str(x) for x in freetext] if isinstance(freetext, list) else [],
         }
+    return result
+
+
+def filter_terms_by_key_concepts(
+    terms: Dict[str, Any],
+    key_concepts: Dict[str, List[str]],
+) -> Dict[str, Any]:
+    """
+    Filter population and intervention terms to only those that relate to the
+    three key concepts per facet. Keeps study_design. Produces a more concise list.
+    """
+    api_key = _load_api_key()
+    client = genai.Client(api_key=api_key)
+
+    terms_json = json.dumps(terms, indent=2)
+    pop_kw = key_concepts.get("population") or []
+    int_kw = key_concepts.get("intervention") or []
+    pop_concepts = ", ".join(pop_kw) if pop_kw else "(none)"
+    int_concepts = ", ".join(int_kw) if int_kw else "(none)"
+
+    prompt = (
+        "You are filtering search terms to match key concepts only.\n\n"
+        "Key concepts for population (keep only terms that clearly relate to these three core concepts): "
+        f"{pop_concepts}\n"
+        "Key concepts for intervention (keep only terms that clearly relate to these three core concepts): "
+        f"{int_concepts}\n\n"
+        "Current terms (may include study_design, population, intervention):\n"
+        f"{terms_json}\n\n"
+        "Return a JSON object with the same top-level keys (study_design, population, intervention).\n"
+        "Preserve study_design exactly. For population and intervention, keep only mesh and freetext terms "
+        "that are clearly related to the three key concepts for that facet. Remove any term that does not "
+        "match the key concepts. Keep the list concise (fewer terms is better).\n"
+        "Each of population and intervention must be {\"mesh\": [...], \"freetext\": [...]}.\n"
+        "Return only valid JSON, no markdown backticks."
+    )
+
+    response = client.models.generate_content(
+        model=_MODEL_NAME,
+        contents=prompt,
+        config={"response_mime_type": "application/json"},
+    )
+
+    raw_text = getattr(response, "text", None) or ""
+    if not raw_text.strip():
+        raw_text = str(response)
+    parsed = json.loads(raw_text)
+
+    result = dict(terms)
+    result["study_design"] = terms.get("study_design", "any")
+    for facet in ("population", "intervention"):
+        obj = parsed.get(facet)
+        if isinstance(obj, dict):
+            mesh = obj.get("mesh")
+            freetext = obj.get("freetext")
+            result[facet] = {
+                "mesh": [str(x) for x in mesh] if isinstance(mesh, list) else [],
+                "freetext": [str(x) for x in freetext] if isinstance(freetext, list) else [],
+            }
+        else:
+            # Fall back to the original terms for that facet
+            result[facet] = terms.get(facet, {"mesh": [], "freetext": []})
     return result
 
 
