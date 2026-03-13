@@ -206,29 +206,12 @@ def _title_from_raw(raw: str) -> str:
 
 
 def _title_only_from_raw(raw: str) -> str:
-    """Extract just the title (no authors) from a reference string.
-
-    Handles two common formats:
-      - "Author1, Author2. Title. Journal..."  (first period ends authors)
-      - "Author1 (2003) Title. Journal..."     (year in parens precedes title)
-    """
+    """Extract just the title (no authors): text between the first and second period."""
     if not raw or not raw.strip():
         return ""
     text = re.sub(r"^\s*\d+[\.\)]\s*", "", raw.strip()).strip()
     if not text:
         return ""
-
-    # Format: "Author (Year) Title. Journal..."
-    year_paren = re.search(r"\(\d{4}\)\s*", text)
-    if year_paren:
-        after_year = text[year_paren.end():].strip()
-        if after_year:
-            dot = after_year.find(".")
-            if dot != -1:
-                return after_year[:dot].strip()
-            return after_year[:500].strip()
-
-    # Format: "Author1, Author2. Title. Journal..."
     first = text.find(".")
     if first == -1:
         return text[:500].strip()

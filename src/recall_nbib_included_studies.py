@@ -325,8 +325,16 @@ def main():
     for p in args.bib_files:
         print(f"  - {p}")
 
+    not_found = [s for s in included if not _is_found(s, by_doi, by_pmid, by_title)]
+    if not_found:
+        print(f"\n--- NOT FOUND ({len(not_found)}) ---\n")
+        for i, s in enumerate(not_found, 1):
+            doi_display = (s.get("doi_display") or s.get("doi_norm") or "").strip()
+            pmid_display = s.get("pmid") or ""
+            print(f"  {i:2}. DOI={doi_display or '(none)'}  PMID={pmid_display or '(none)'}")
+
     if args.list:
-        print("\n--- Included studies: FOUND vs NOT FOUND ---\n")
+        print("\n--- All included studies: FOUND vs NOT FOUND ---\n")
         for i, s in enumerate(included, 1):
             found = _is_found(s, by_doi, by_pmid, by_title)
             label = "FOUND" if found else "NOT FOUND"

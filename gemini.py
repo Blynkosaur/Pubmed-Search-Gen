@@ -196,22 +196,8 @@ def extract_terms(
         f"Comparator: {comp}\nOutcome: {outc}\n\n"
         "Below are reference titles, abstracts, and MeSH terms from included or key papers.\n"
         "Extract search terms relevant to each PICO facet. For each facet provide:\n"
-        "- mesh: MeSH terms that appear in the references' MeSH lists for that facet.\n"
-        "  IMPORTANT MeSH selection rules:\n"
-        "  * Use the MOST SPECIFIC MeSH heading available. If both a parent term and a child term "
-        "exist (e.g. 'Hypoglycemic Agents' vs 'Sodium-Glucose Transporter 2 Inhibitors'), use ONLY "
-        "the child/specific term.\n"
-        "  * NEVER include demographic or check-tag MeSH like: Humans, Animals, Male, Female, Adult, "
-        "Aged, Middle Aged, Young Adult, Adolescent, Child, Infant, Age Factors, Sex Factors.\n"
-        "  * NEVER include study-design MeSH like: Prospective Studies, Retrospective Studies, "
-        "Cohort Studies, Cross-Sectional Studies, Follow-Up Studies, Longitudinal Studies, "
-        "Double-Blind Method, Randomized Controlled Trials as Topic.\n"
-        "  * NEVER include broad chemical/pharmacological parent classes (e.g. 'Glucosides', "
-        "'Benzhydryl Compounds', 'Hypoglycemic Agents', 'Anti-Inflammatory Agents') when a more "
-        "specific drug-class MeSH exists.\n"
-        "  * NEVER include generic methodology MeSH like: Treatment Outcome, Patient Selection, "
-        "Time Factors, Predictive Value of Tests, Sensitivity and Specificity, Reference Standards, "
-        "Reproducibility of Results.\n"
+        "- mesh: MeSH terms that appear in the references' MeSH lists for that facet. "
+        "Include BOTH specific MeSH headings AND broader commonly-assigned ones (e.g. \"Prognosis\", \"Risk Factors\").\n"
         "- freetext: natural language phrases. IMPORTANT: include both general category terms "
         "(e.g. \"risk score\", \"prognostic model\", \"prediction model\") AND specific named examples "
         "(e.g. \"MELD score\", \"CARRS score\"). General terms are critical for recall.\n\n"
@@ -318,6 +304,56 @@ def filter_terms_by_key_concepts(
     return result
 
 
+def extract_titles_from_references(raw_refs: List[str]) -> List[str]:
+    """
+    Given a list of raw reference strings (no DOI/PMID found), ask Gemini to
+    extract a clean, PubMed-searchable article title from each one.
+
+    Returns a list of titles in the same order as raw_refs.
+    Empty string for any reference where a title cannot be determined.
+    """
+    if not raw_refs:
+        return []
+
+    api_key = _load_api_key()
+    client = genai.Client(api_key=api_key)
+
+    numbered = "\n".join(f"[{i}] {r.strip()}" for i, r in enumerate(raw_refs))
+
+    prompt = (
+        "You are a biomedical reference parser.\n\n"
+        "Below is a numbered list of raw reference strings extracted from a PDF.\n"
+        "For each reference, extract ONLY the article title — not the authors, "
+        "journal name, volume, pages, or year.\n\n"
+        "The title should be clean, complete, and suitable for searching PubMed "
+        '(e.g. searchable via "title"[Title] in PubMed).\n\n'
+        "Return a JSON array of strings, one per reference, in the same order.\n"
+        "If you cannot determine the title for a reference, use an empty string.\n\n"
+        f"References:\n{numbered}\n\n"
+        "Return only valid JSON (an array of strings), no markdown backticks."
+    )
+
+    response = client.models.generate_content(
+        model=_MODEL_NAME,
+        contents=prompt,
+        config={"response_mime_type": "application/json"},
+    )
+
+    raw_text = getattr(response, "text", None) or ""
+    if not raw_text.strip():
+        raw_text = str(response)
+    parsed = json.loads(raw_text)
+
+    if not isinstance(parsed, list):
+        return [""] * len(raw_refs)
+
+    # Pad or truncate to match input length
+    titles = [str(t).strip() if t else "" for t in parsed]
+    while len(titles) < len(raw_refs):
+        titles.append("")
+    return titles[: len(raw_refs)]
+
+
 def _refs_text_for_prompt(references: List[Dict[str, Any]], max_chars: int = 40_000) -> str:
     """Build concatenated title/abstract/MeSH text for reference list (for prompts)."""
     ref_parts: List[str] = []
@@ -372,17 +408,9 @@ def filter_extracted_terms(
         "- Keep each list to 8-12 terms. Include a mix of general and specific terms.\n"
         "- Do not include short abbreviations as standalone freetext — they are too ambiguous. "
         "Only include them if combined with other words.\n"
-        "- For MeSH: use the MOST SPECIFIC MeSH heading available. Rules:\n"
-        "  * If both a parent term and a child term exist (e.g. 'Hypoglycemic Agents' vs "
-        "'Sodium-Glucose Transporter 2 Inhibitors'), keep ONLY the child/specific term.\n"
-        "  * REMOVE demographic/check-tag MeSH: Humans, Animals, Male, Female, Adult, Aged, "
-        "Middle Aged, Young Adult, Adolescent, Child, Infant, Age Factors, Sex Factors.\n"
-        "  * REMOVE study-design MeSH: Prospective Studies, Retrospective Studies, Cohort Studies, "
-        "Cross-Sectional Studies, Follow-Up Studies, Double-Blind Method.\n"
-        "  * REMOVE broad chemical/pharmacological parent classes (e.g. 'Glucosides', "
-        "'Benzhydryl Compounds', 'Hypoglycemic Agents') when a more specific drug-class MeSH is present.\n"
-        "  * REMOVE generic methodology MeSH: Treatment Outcome, Patient Selection, Time Factors, "
-        "Predictive Value of Tests, Sensitivity and Specificity, Reference Standards.\n"
+        "- For MeSH: prefer specific MeSH headings but also keep broader ones that are commonly assigned "
+        "to relevant papers (e.g. \"Prognosis\", \"Risk Factors\"). Do NOT drop a MeSH term just because "
+        "it is broad — if it appears frequently in the references' MeSH lists, keep it.\n"
     )
 
     prompt = (
