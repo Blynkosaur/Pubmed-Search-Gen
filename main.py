@@ -45,8 +45,8 @@ def run(pdf_path: Path) -> None:
             print("No references could be parsed from the PDF; cannot build cache.")
             return
 
-        # 2) Build identifiers: DOI if present, else PMID, else title-only (no authors)
-        identifiers = []
+        # 2) Build identifier for each ref (keep parallel with refs list)
+        paired: list[tuple] = []
         for r in refs:
             doi = (getattr(r, "doi", None) or "").strip()
             pmid = (getattr(r, "pmid", None) or "").strip()
@@ -56,9 +56,10 @@ def run(pdf_path: Path) -> None:
                 ident = pmid
             else:
                 ident = _title_only_from_raw(getattr(r, "raw", "") or "")
-            if ident:
-                identifiers.append(ident)
+            paired.append((ident, r))
 
+        # Only send non-empty identifiers to PubMed, but track mapping
+        identifiers = [ident for ident, _ in paired if ident]
         if not identifiers:
             print("No DOIs or titles found in parsed references; cannot build cache.")
             return
@@ -66,25 +67,26 @@ def run(pdf_path: Path) -> None:
         # 3) Fetch PubMed metadata (pmid, doi, title, abstract, mesh_terms, etc.)
         metadata = fetch_metadata_for_identifiers(identifiers)
 
-        # 4) Normalize into reference dicts expected by downstream code
+        # 4) Normalize into reference dicts, keeping alignment with refs
+        meta_iter = iter(metadata)
         references = []
-        for meta, ref in zip(metadata, refs):
-            if isinstance(meta, dict) and meta:
-                # Use metadata record as-is (includes title, abstract, mesh_terms)
-                references.append(meta)
-            else:
-                # Fallback minimal record — use title-only (no authors)
-                raw = getattr(ref, "raw", "") or ""
-                title = _title_only_from_raw(raw)
-                if not title:
-                    title = (getattr(ref, "title", None) or "").strip()
-                references.append(
-                    {
-                        "title": title,
-                        "abstract": "",
-                        "mesh_terms": [],
-                    }
-                )
+        for ident, ref in paired:
+            if ident:
+                meta = next(meta_iter, {})
+                if isinstance(meta, dict) and meta:
+                    references.append(meta)
+                    continue
+            raw = getattr(ref, "raw", "") or ""
+            title = _title_only_from_raw(raw)
+            if not title:
+                title = (getattr(ref, "title", None) or "").strip()
+            references.append(
+                {
+                    "title": title,
+                    "abstract": "",
+                    "mesh_terms": [],
+                }
+            )
 
         cache_path.write_text(json.dumps(references, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"Wrote {len(references)} reference records to {cache_path}\n")

@@ -4,51 +4,6 @@ from typing import Any, Dict, List, Set
 
 _PICO_FACETS = ("population", "intervention", "comparator", "outcome")
 
-_BROAD_MESH_BLACKLIST: Set[str] = {
-    "Humans",
-    "Animals",
-    "Adult",
-    "Aged",
-    "Aged, 80 and over",
-    "Middle Aged",
-    "Young Adult",
-    "Adolescent",
-    "Child",
-    "Child, Preschool",
-    "Infant",
-    "Infant, Newborn",
-    "Male",
-    "Female",
-    "Age Factors",
-    "Sex Factors",
-    "Prospective Studies",
-    "Retrospective Studies",
-    "Follow-Up Studies",
-    "Cross-Sectional Studies",
-    "Cohort Studies",
-    "Case-Control Studies",
-    "Longitudinal Studies",
-    "Treatment Outcome",
-    "Patient Selection",
-    "Time Factors",
-    "Incidence",
-    "Prevalence",
-    "Comorbidity",
-    "Reproducibility of Results",
-    "Predictive Value of Tests",
-    "Sensitivity and Specificity",
-    "Reference Standards",
-}
-
-
-def _normalize_mesh(term: str) -> str:
-    return term.strip().lower()
-
-
-def _is_blacklisted(term: str) -> bool:
-    norm = _normalize_mesh(term)
-    return any(_normalize_mesh(b) == norm for b in _BROAD_MESH_BLACKLIST)
-
 
 def _truncate(term: str) -> str:
     """Append PubMed truncation wildcard to the last word if not already present."""
@@ -76,10 +31,9 @@ def build_query(terms: Dict[str, Any]) -> str:
     """
     Build a PubMed boolean query from PICO terms (population, intervention,
     comparator, outcome).
-    - Population MeSH uses [MeSH Major Topic]; other facets use [MeSH Terms].
-    - Broad demographic/methodological MeSH are blacklisted.
+    - All MeSH uses [MeSH Terms] for broad recall.
     - Freetext terms are truncated (wildcard *) and expanded with hyphen variants.
-    - Only multi-word freetext terms are included.
+    - Single-word and multi-word freetext terms are both included.
     - Only Population + Intervention facets are AND'd.
     """
     study_design = (terms.get("study_design") or "any")
@@ -95,17 +49,15 @@ def build_query(terms: Dict[str, Any]) -> str:
             filtered[facet] = {"mesh": [], "freetext": []}
             continue
         raw_mesh = list(data.get("mesh") or []) if isinstance(data.get("mesh"), list) else []
-        mesh = [m for m in raw_mesh if m and str(m).strip() and not _is_blacklisted(str(m))]
+        mesh = [m for m in raw_mesh if m and str(m).strip()]
         freetext_raw = list(data.get("freetext") or []) if isinstance(data.get("freetext"), list) else []
-        freetext = [t for t in freetext_raw if len(str(t).split()) >= 2]
+        freetext = [t for t in freetext_raw if t and str(t).strip()]
         filtered[facet] = {"mesh": mesh, "freetext": freetext}
-
-    _MAJOR_TOPIC_FACETS = {"population"}
 
     def clause(facet: str) -> str:
         mesh = filtered.get(facet, {}).get("mesh") or []
         freetext = filtered.get(facet, {}).get("freetext") or []
-        mesh_tag = "[MeSH Major Topic]" if facet in _MAJOR_TOPIC_FACETS else "[MeSH Terms]"
+        mesh_tag = "[MeSH Terms]"
         parts: List[str] = []
         for m in mesh:
             if m and str(m).strip():
