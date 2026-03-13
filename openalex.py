@@ -188,6 +188,7 @@ def build_citation_graph(
 
     # ── Loop 0b: papers that cite the SR itself ──────────────────────────
     if sr_doi:
+        print(f"[OpenAlex] Loop 0b: looking up SR (doi={sr_doi}) …")
         sr_work = _lookup_by_doi(sr_doi)
         if sr_work:
             cited_by_url = sr_work.get("cited_by_api_url") or ""
@@ -207,6 +208,11 @@ def build_citation_graph(
                         hop0_works.append((cw_doi, cw))
                         added += 1
                 print(f"[OpenAlex] Loop 0b done — added {added} papers citing the SR")
+            else:
+                print(
+                    "[OpenAlex] Loop 0b: SR found on OpenAlex but no cited_by URL; "
+                    "skipping cited-by-SR seeds."
+                )
         else:
             print(f"[OpenAlex] Loop 0b: could not find SR on OpenAlex (doi={sr_doi})")
 
