@@ -25,14 +25,15 @@ class Reference:
     Lightweight representation of a reference extracted from a PDF.
 
     Fields are best-effort and may be None if they cannot be parsed reliably.
-    title is extracted from raw (e.g. first sentence after year); use it when DOI is missing.
+    title is authors + title (up to second period); use with doi/pmid for lookup.
     """
 
     index: int
     raw: str
     doi: Optional[str] = None
     year: Optional[int] = None
-    title: Optional[str] = None  # best-effort from raw; use when doi is missing
+    title: Optional[str] = None  # authors + title (up to second period)
+    pmid: Optional[str] = None  # if present in raw text (e.g. "PMID: 12345")
 
 
 _DOI_REGEX = re.compile(
@@ -41,6 +42,9 @@ _DOI_REGEX = re.compile(
 )
 
 _YEAR_REGEX = re.compile(r"\b(19|20)\d{2}\b")
+
+# PMID in reference text: "PMID: 12345", "PubMed PMID 12345", etc.
+_PMID_REGEX = re.compile(r"(?:PMID|PubMed(?:\s*ID)?)\s*:?\s*(\d{5,8})\b", re.IGNORECASE)
 
 def extract_doi_or_title(raw: str) -> str:
     """
@@ -177,37 +181,41 @@ def _is_real_reference(raw: str) -> bool:
         return False
     if _DOI_REGEX.search(s):
         return True
-    if len(s) < 25:
+    if _PMID_REGEX.search(s):
+        return True
+    if len(s) < 15:
         return False
     return True
 
 
 def _title_from_raw(raw: str) -> str:
-    """Extract a best-effort title from reference raw text (e.g. first sentence after year)."""
+    """Extract authors + title: strip leading ref number, then take up to and including the second period."""
     if not raw or not raw.strip():
         return ""
-    text = raw.strip()
-    # After "(YEAR)" take up to the next period as title
-    m = re.search(r"\(\s*(19|20)\d{2}\s*\)\s*(.+)", text)
-    if m:
-        after_year = m.group(2).strip()
-        first_sentence = after_year.split(".")[0].strip()
-        if first_sentence:
-            return first_sentence
-    # Fallback: first sentence / segment before first period
-    first = text.split(".")[0].strip()
-    return first if first else text[:500]
+    text = re.sub(r"^\s*\d+[\.\)]\s*", "", raw.strip()).strip()
+    if not text:
+        return ""
+    idx = -1
+    for _ in range(2):
+        idx = text.find(".", idx + 1)
+        if idx == -1:
+            break
+    if idx != -1:
+        return text[: idx + 1].strip()
+    return text[:500].strip()
 
 
 def _parse_single_reference(raw: str, index: int) -> Reference:
     doi_match = _DOI_REGEX.search(raw)
     year_match = _YEAR_REGEX.search(raw)
+    pmid_match = _PMID_REGEX.search(raw)
 
     doi = doi_match.group(0) if doi_match else None
     year = int(year_match.group(0)) if year_match else None
     title = _title_from_raw(raw)
+    pmid = pmid_match.group(1) if pmid_match else None
 
-    return Reference(index=index, raw=raw.strip(), doi=doi, year=year, title=title or None)
+    return Reference(index=index, raw=raw.strip(), doi=doi, year=year, title=title or None, pmid=pmid)
 
 
 def parse(pdf_path: Union[str, Path]) -> List[Reference]:
@@ -452,6 +460,10 @@ def fetch_metadata_for_identifiers(
             index_to_pmid[i] = None
             continue
         s = str(ident).strip()
+        # Numeric 5–8 digits: treat as PMID, skip ESearch
+        if s.isdigit() and 5 <= len(s) <= 8:
+            index_to_pmid[i] = s
+            continue
         if _DOI_REGEX.search(s):
             term = f'"{_DOI_REGEX.search(s).group(0)}"[doi]'
         else:

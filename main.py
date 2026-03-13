@@ -45,10 +45,12 @@ def run(pdf_path: Path) -> None:
             print("No references could be parsed from the PDF; cannot build cache.")
             return
 
-        # 2) Build identifiers: DOI if present, else the parsed title
+        # 2) Build identifiers: DOI if present, else PMID, else authors+title
         identifiers = []
         for r in refs:
-            ident = (getattr(r, "doi", None) or getattr(r, "title", None) or "").strip()
+            ident = (
+                (getattr(r, "doi", None) or getattr(r, "pmid", None) or getattr(r, "title", None)) or ""
+            ).strip()
             if ident:
                 identifiers.append(ident)
 
