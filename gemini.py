@@ -11,6 +11,8 @@ from google import genai
 
 _MODEL_NAME = "gemini-2.5-flash"
 
+_PICO_FACETS = ("population", "intervention", "comparator", "outcome")
+
 
 def _load_dotenv_if_present() -> None:
     """
@@ -82,12 +84,15 @@ def pico_extractor(pdf_path: Union[str, Path]) -> Dict[str, object]:
     prompt = (
         "You are assisting with systematic review reproducibility.\n"
         "Given the following systematic review manuscript text, identify the review's\n"
-        "own PICO: Population and Intervention only.\n\n"
+        "own PICO: Population, Intervention, Comparator, and Outcome.\n\n"
         "Return a JSON object with exactly these keys:\n"
         '{\n'
         '  "population": string,\n'
-        '  "intervention": string\n'
+        '  "intervention": string,\n'
+        '  "comparator": string,\n'
+        '  "outcome": string\n'
         "}\n\n"
+        "If a facet is not applicable or not clearly stated, use an empty string.\n\n"
         "Manuscript text:\n"
         f"{truncated}\n\n"
         "Return only valid JSON, no markdown backticks"
@@ -108,28 +113,33 @@ def pico_extractor(pdf_path: Union[str, Path]) -> Dict[str, object]:
 
 def get_pico_keywords(pico: Dict[str, Any]) -> Dict[str, List[str]]:
     """
-    Ask Gemini for exactly three keywords that describe the population and
-    three that describe the intervention. Used to filter terms to key concepts.
-    Returns {"population": ["kw1", "kw2", "kw3"], "intervention": ["kw1", "kw2", "kw3"]}.
+    Ask Gemini for exactly three keywords per PICO facet.
+    Returns e.g. {"population": [...], "intervention": [...], "comparator": [...], "outcome": [...]}.
     """
     api_key = _load_api_key()
     client = genai.Client(api_key=api_key)
 
     pop = (pico.get("population") or "").strip()
     interv = (pico.get("intervention") or "").strip()
+    comp = (pico.get("comparator") or "").strip()
+    outc = (pico.get("outcome") or "").strip()
 
     prompt = (
         "You are helping build a concise search strategy for a systematic review.\n\n"
         "PICO:\n"
         f"Population: {pop}\n"
-        f"Intervention: {interv}\n\n"
-        "Give exactly three keywords or short phrases that best capture the population (who the patients are), "
-        "and exactly three that best capture the intervention (what is being done). "
-        "Use the most specific, searchable terms.\n\n"
-        "Return a JSON object with exactly two keys: population, intervention.\n"
-        "Each value must be an array of exactly three strings.\n"
-        'Example: {"population":["coronary heart disease","myocardial infarction","acute coronary syndrome"],'
-        '"intervention":["telemedicine","remote monitoring","cardiac rehabilitation"]}\n'
+        f"Intervention: {interv}\n"
+        f"Comparator: {comp}\n"
+        f"Outcome: {outc}\n\n"
+        "For each PICO facet, give exactly three keywords or short phrases that best capture it. "
+        "Use the most specific, searchable terms. If a facet is empty or not applicable, "
+        "return an empty array for it.\n\n"
+        "Return a JSON object with exactly four keys: population, intervention, comparator, outcome.\n"
+        "Each value must be an array of exactly three strings (or empty if not applicable).\n"
+        'Example: {"population":["heart transplant recipients","end-stage heart failure","cardiac transplantation"],'
+        '"intervention":["risk prediction model","prognostic score","survival prediction"],'
+        '"comparator":[],'
+        '"outcome":["post-transplant mortality","graft survival","1-year survival"]}\n'
         "Return only valid JSON, no markdown backticks."
     )
 
@@ -145,21 +155,12 @@ def get_pico_keywords(pico: Dict[str, Any]) -> Dict[str, List[str]]:
     parsed = json.loads(raw_text)
 
     result: Dict[str, List[str]] = {}
-    for facet in ("population", "intervention"):
+    for facet in _PICO_FACETS:
         arr = parsed.get(facet)
         if isinstance(arr, list) and len(arr) >= 3:
-            result[facet] = [
-                str(arr[0]).strip(),
-                str(arr[1]).strip(),
-                str(arr[2]).strip(),
-            ]
+            result[facet] = [str(arr[0]).strip(), str(arr[1]).strip(), str(arr[2]).strip()]
         elif isinstance(arr, list) and len(arr) == 2:
-            # Duplicate the second term to keep three total
-            result[facet] = [
-                str(arr[0]).strip(),
-                str(arr[1]).strip(),
-                str(arr[1]).strip(),
-            ]
+            result[facet] = [str(arr[0]).strip(), str(arr[1]).strip(), str(arr[1]).strip()]
         elif isinstance(arr, list) and len(arr) == 1:
             v = str(arr[0]).strip()
             result[facet] = [v, v, v]
@@ -176,60 +177,37 @@ def extract_terms(
     Extract search terms (MeSH + freetext) for each PICO facet from reference
     abstracts and MeSH terms, using the PICO as a guide for relevance.
 
-    - pico: dict with keys population, intervention.
-    - references: list of dicts, each with "abstract" and "mesh_terms" (list of strings).
-
-    Returns a dict with one entry per PICO facet; each value is
+    Returns a dict with study_design + one entry per PICO facet; each value is
     {"mesh": [...], "freetext": [...]}.
     """
     api_key = _load_api_key()
     client = genai.Client(api_key=api_key)
 
-    # Build reference text: title + abstract + MeSH for each ref (truncate if huge).
-    ref_parts: List[str] = []
-    max_ref_chars = 80_000  # leave room for prompt + PICO + response
-    total = 0
-    for i, ref in enumerate(references):
-        title = (ref.get("title") or "").strip()
-        abstract = (ref.get("abstract") or "").strip()
-        mesh = ref.get("mesh_terms")
-        if isinstance(mesh, list):
-            mesh_str = "; ".join(str(m) for m in mesh if m)
-        else:
-            mesh_str = str(mesh or "")
-        lines = [f"[Ref {i + 1}]", f"Title: {title}"]
-        if abstract:
-            lines.append(f"Abstract: {abstract}")
-        if mesh_str:
-            lines.append(f"MeSH: {mesh_str}")
-        block = "\n".join(lines) + "\n"
-        if total + len(block) > max_ref_chars:
-            block = block[: max_ref_chars - total] + "\n... (truncated)"
-            ref_parts.append(block)
-            break
-        ref_parts.append(block)
-        total += len(block)
-
-    refs_text = "\n".join(ref_parts) if ref_parts else "(No references provided.)"
+    refs_text = _refs_text_for_prompt(references, max_chars=80_000)
     pop = pico.get("population") or ""
     interv = pico.get("intervention") or ""
+    comp = pico.get("comparator") or ""
+    outc = pico.get("outcome") or ""
 
     prompt = (
         "You are helping build a search strategy for a systematic review.\n\n"
         "PICO from the review:\n"
-        f"Population: {pop}\nIntervention: {interv}\n\n"
+        f"Population: {pop}\nIntervention: {interv}\n"
+        f"Comparator: {comp}\nOutcome: {outc}\n\n"
         "Below are reference titles, abstracts, and MeSH terms from included or key papers.\n"
         "Extract search terms relevant to each PICO facet. For each facet provide:\n"
-        "- mesh: MeSH terms (or similar controlled terms) that match the facet.\n"
-        "- freetext: natural language / keyword phrases (synonyms, abbreviations, drug names, etc.).\n\n"
+        "- mesh: MeSH terms that appear in the references' MeSH lists for that facet. "
+        "Include BOTH specific MeSH headings AND broader commonly-assigned ones (e.g. \"Prognosis\", \"Risk Factors\").\n"
+        "- freetext: natural language phrases. IMPORTANT: include both general category terms "
+        "(e.g. \"risk score\", \"prognostic model\", \"prediction model\") AND specific named examples "
+        "(e.g. \"MELD score\", \"CARRS score\"). General terms are critical for recall.\n\n"
         "Also provide study_design: one of randomized_controlled_trial, observational, systematic_review, or any.\n\n"
         "References (titles, abstracts, MeSH):\n"
         f"{refs_text}\n\n"
-        "Return a JSON object with exactly three keys: study_design, population, intervention.\n"
+        "Return a JSON object with exactly five keys: study_design, population, intervention, comparator, outcome.\n"
         "study_design must be one of: randomized_controlled_trial, observational, systematic_review, any.\n"
-        "population and intervention must each be an object with two keys: \"mesh\" (array of strings) and \"freetext\" (array of strings).\n"
-        "Example: {\"study_design\":\"randomized_controlled_trial\",\"population\":{\"mesh\":[\"Renal Insufficiency, Chronic\"],\"freetext\":[\"chronic kidney disease\",\"CKD\"]},"
-        "\"intervention\":{\"mesh\":[\"Sodium-Glucose Transporter 2 Inhibitors\"],\"freetext\":[\"SGLT-2 inhibitors\",\"dapagliflozin\"]}}\n"
+        "Each PICO facet must be an object with two keys: \"mesh\" (array of strings) and \"freetext\" (array of strings).\n"
+        "If a facet is not applicable, use empty arrays.\n"
         "Return only valid JSON, no markdown backticks."
     )
 
@@ -244,14 +222,12 @@ def extract_terms(
         raw_text = str(response)
     parsed = json.loads(raw_text)
 
-    # Normalize to the expected shape (study_design + mesh + freetext lists per facet).
     valid_designs = ("randomized_controlled_trial", "observational", "systematic_review", "any")
     study_design = str(parsed.get("study_design") or "any").strip().lower()
     if study_design not in valid_designs:
         study_design = "any"
     result: Dict[str, Any] = {"study_design": study_design}
-    facets = ("population", "intervention")
-    for facet in facets:
+    for facet in _PICO_FACETS:
         obj = parsed.get(facet)
         if not isinstance(obj, dict):
             result[facet] = {"mesh": [], "freetext": []}
@@ -270,31 +246,34 @@ def filter_terms_by_key_concepts(
     key_concepts: Dict[str, List[str]],
 ) -> Dict[str, Any]:
     """
-    Filter population and intervention terms to only those that relate to the
-    three key concepts per facet. Keeps study_design. Produces a more concise list.
+    Filter each PICO facet's terms to only those that relate to the
+    three key concepts for that facet. Keeps study_design. Produces a more concise list.
     """
     api_key = _load_api_key()
     client = genai.Client(api_key=api_key)
 
     terms_json = json.dumps(terms, indent=2)
-    pop_kw = key_concepts.get("population") or []
-    int_kw = key_concepts.get("intervention") or []
-    pop_concepts = ", ".join(pop_kw) if pop_kw else "(none)"
-    int_concepts = ", ".join(int_kw) if int_kw else "(none)"
+    concept_lines = []
+    for facet in _PICO_FACETS:
+        kw = key_concepts.get(facet) or []
+        concepts_str = ", ".join(kw) if kw else "(none / not applicable)"
+        concept_lines.append(
+            f"Key concepts for {facet} (keep only terms that clearly relate to these): {concepts_str}"
+        )
 
     prompt = (
         "You are filtering search terms to match key concepts only.\n\n"
-        "Key concepts for population (keep only terms that clearly relate to these three core concepts): "
-        f"{pop_concepts}\n"
-        "Key concepts for intervention (keep only terms that clearly relate to these three core concepts): "
-        f"{int_concepts}\n\n"
-        "Current terms (may include study_design, population, intervention):\n"
+        + "\n".join(concept_lines) + "\n\n"
+        "Current terms:\n"
         f"{terms_json}\n\n"
-        "Return a JSON object with the same top-level keys (study_design, population, intervention).\n"
-        "Preserve study_design exactly. For population and intervention, keep only mesh and freetext terms "
-        "that are clearly related to the three key concepts for that facet. Remove any term that does not "
-        "match the key concepts. Keep the list concise (fewer terms is better).\n"
-        "Each of population and intervention must be {\"mesh\": [...], \"freetext\": [...]}.\n"
+        "Return a JSON object with the same top-level keys "
+        "(study_design, population, intervention, comparator, outcome).\n"
+        "Preserve study_design exactly. For each PICO facet, keep only mesh and freetext terms "
+        "that are related to the key concepts for that facet. Remove terms that are completely unrelated.\n"
+        "IMPORTANT: for each facet, keep BOTH general category terms (e.g. \"risk score\", \"prognosis\") "
+        "AND specific named terms. Do NOT over-filter — it is better to keep a somewhat broader term "
+        "than to miss relevant papers. If a facet has no key concepts, keep it empty.\n"
+        "Each facet must be {\"mesh\": [...], \"freetext\": [...]}.\n"
         "Return only valid JSON, no markdown backticks."
     )
 
@@ -311,7 +290,7 @@ def filter_terms_by_key_concepts(
 
     result = dict(terms)
     result["study_design"] = terms.get("study_design", "any")
-    for facet in ("population", "intervention"):
+    for facet in _PICO_FACETS:
         obj = parsed.get(facet)
         if isinstance(obj, dict):
             mesh = obj.get("mesh")
@@ -321,7 +300,6 @@ def filter_terms_by_key_concepts(
                 "freetext": [str(x) for x in freetext] if isinstance(freetext, list) else [],
             }
         else:
-            # Fall back to the original terms for that facet
             result[facet] = terms.get(facet, {"mesh": [], "freetext": []})
     return result
 
@@ -354,8 +332,7 @@ def filter_extracted_terms(
     references: List[Dict[str, Any]],
 ) -> Dict[str, Dict[str, List[str]]]:
     """
-    Filter extracted terms using rules: population = who patients are only;
-    intervention = core mechanism/modality only; prefer specific over broad;
+    Filter extracted terms using rules per PICO facet; prefer specific over broad;
     6-10 terms max per list; prefer terms that appear often in the abstracts.
     """
     api_key = _load_api_key()
@@ -366,19 +343,24 @@ def filter_extracted_terms(
 
     rules = (
         "Rules for term selection:\n"
-        "- Population mesh and freetext: include only terms that define who the patients are "
+        "- Population: include only terms that define who the patients are "
         "(diagnoses, conditions, procedures that determine eligibility). Exclude demographic terms, "
         "generic terms like \"adult\" or \"patient\", and terms that describe treatments or interventions.\n"
-        "- Intervention mesh and freetext: include only terms that define the core mechanism or modality "
-        "of the intervention — what makes it distinct. Exclude terms describing the content, goals, or outcomes of the intervention.\n"
-        "- Prioritize specific terms over broad ones. A term that appears in 10,000 PubMed records is too broad "
-        "unless it's the only way to describe the concept.\n"
-        "- Keep each list to 6-10 terms maximum. Prefer terms that appear frequently in the provided abstracts.\n"
-        "- Do not include abbreviations like CR, MI, ACS as standalone freetext terms — they are too ambiguous. "
+        "- Intervention: include terms that define the core mechanism or modality "
+        "of the intervention — what makes it distinct. IMPORTANT: always include BOTH general category terms "
+        "(e.g. \"risk score\", \"prognostic model\", \"prediction model\") AND specific named examples "
+        "(e.g. \"MELD score\", \"APACHE II\"). General terms are essential for recall — "
+        "specific named tools alone will miss many relevant studies that use different tools for the same purpose.\n"
+        "- Comparator: include only terms that define what the intervention is compared against "
+        "(e.g. placebo, standard care, alternative treatment). If none, leave empty.\n"
+        "- Outcome: include only terms that define the measured outcomes or endpoints "
+        "(e.g. mortality, survival, recurrence, quality of life). Exclude generic method terms.\n"
+        "- Keep each list to 8-12 terms. Include a mix of general and specific terms.\n"
+        "- Do not include short abbreviations as standalone freetext — they are too ambiguous. "
         "Only include them if combined with other words.\n"
-        "- Exclude terms that are a broader category than necessary. A term is too broad if it would match large numbers "
-        "of papers outside the scope of this specific review. For example, a single common word or a parent category "
-        "that encompasses many unrelated conditions or interventions. When in doubt, prefer the more specific term over the general one.\n"
+        "- For MeSH: prefer specific MeSH headings but also keep broader ones that are commonly assigned "
+        "to relevant papers (e.g. \"Prognosis\", \"Risk Factors\"). Do NOT drop a MeSH term just because "
+        "it is broad — if it appears frequently in the references' MeSH lists, keep it.\n"
     )
 
     prompt = (
@@ -388,7 +370,7 @@ def filter_extracted_terms(
         f"{terms_json}\n\n"
         "Reference titles, abstracts, and MeSH (use to prefer frequently appearing terms):\n"
         f"{refs_text}\n\n"
-        "Return a JSON object with exactly two keys: population, intervention.\n"
+        "Return a JSON object with exactly four keys: population, intervention, comparator, outcome.\n"
         "Each value must be an object with two keys: \"mesh\" (array of strings) and \"freetext\" (array of strings).\n"
         "Apply the rules above and keep 6-10 terms per list. Return only valid JSON, no markdown backticks."
     )
@@ -404,10 +386,8 @@ def filter_extracted_terms(
         raw_text = str(response)
     parsed = json.loads(raw_text)
 
-    # Preserve study_design from input; filter only population and intervention.
     result: Dict[str, Any] = {"study_design": terms.get("study_design", "any")}
-    facets = ("population", "intervention")
-    for facet in facets:
+    for facet in _PICO_FACETS:
         obj = parsed.get(facet)
         if not isinstance(obj, dict):
             result[facet] = {"mesh": [], "freetext": []}

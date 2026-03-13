@@ -205,6 +205,25 @@ def _title_from_raw(raw: str) -> str:
     return text[:500].strip()
 
 
+def _title_only_from_raw(raw: str) -> str:
+    """Extract just the title (no authors): text between the first and second period."""
+    if not raw or not raw.strip():
+        return ""
+    text = re.sub(r"^\s*\d+[\.\)]\s*", "", raw.strip()).strip()
+    if not text:
+        return ""
+    first = text.find(".")
+    if first == -1:
+        return text[:500].strip()
+    after_first = text[first + 1:].strip()
+    if not after_first:
+        return text[:500].strip()
+    second = after_first.find(".")
+    if second != -1:
+        return after_first[:second].strip()
+    return after_first[:500].strip()
+
+
 def _parse_single_reference(raw: str, index: int) -> Reference:
     doi_match = _DOI_REGEX.search(raw)
     year_match = _YEAR_REGEX.search(raw)

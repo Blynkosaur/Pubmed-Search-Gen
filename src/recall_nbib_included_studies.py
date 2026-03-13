@@ -57,51 +57,58 @@ def normalize_title_for_match(title):
 def load_included_studies(excel_path):
     """Load included studies from Excel. Returns list of dicts with doi_norm, pmid, title_norm, year."""
     try:
-        import pandas as pd
+        import openpyxl
     except ImportError:
-        sys.exit("Install pandas and openpyxl: pip install pandas openpyxl")
+        sys.exit("Install openpyxl: pip install openpyxl")
 
-    df = pd.read_excel(excel_path)
-    doi_col = pmid_col = title_col = year_col = None
-    for c in df.columns:
-        if c and "doi" in str(c).lower():
-            doi_col = c
-        if c and ("pubmed" in str(c).lower() or "pmid" in str(c).lower()):
-            pmid_col = c
-        if c and "title" in str(c).lower():
-            title_col = c
-        if c and "year" in str(c).lower():
-            year_col = c
-    doi_col = doi_col or "DOI"
-    pmid_col = pmid_col or "PubMed ID"
-    title_col = title_col or "Title"
-    year_col = year_col or "Year"
+    wb = openpyxl.load_workbook(str(excel_path), read_only=True, data_only=True)
+    ws = wb.active
+    rows_iter = ws.iter_rows(values_only=True)
+    headers = [str(h or "").strip() for h in next(rows_iter, [])]
+
+    doi_idx = pmid_idx = title_idx = year_idx = None
+    for i, h in enumerate(headers):
+        hl = h.lower()
+        if "doi" in hl and doi_idx is None:
+            doi_idx = i
+        if ("pubmed" in hl or "pmid" in hl) and pmid_idx is None:
+            pmid_idx = i
+        if "title" in hl and title_idx is None:
+            title_idx = i
+        if "year" in hl and year_idx is None:
+            year_idx = i
+
+    def _cell(row_tuple, idx):
+        if idx is None or idx >= len(row_tuple):
+            return None
+        return row_tuple[idx]
 
     studies = []
     seen = set()
-    for _, row in df.iterrows():
-        doi_norm = normalize_doi(row.get(doi_col))
-        pmid = normalize_pmid(row.get(pmid_col))
-        title_norm = normalize_title_for_match(row.get(title_col))
-        year = row.get(year_col)
-        if isinstance(year, (int, float)) and year == year:
-            year = int(year)
+    for row in rows_iter:
+        doi_norm = normalize_doi(_cell(row, doi_idx))
+        pmid = normalize_pmid(_cell(row, pmid_idx))
+        title_norm = normalize_title_for_match(_cell(row, title_idx))
+        year_raw = _cell(row, year_idx)
+        if isinstance(year_raw, (int, float)) and year_raw == year_raw:
+            year = int(year_raw)
         else:
             year = None
-        # Include every row that has at least one identifier or title (count all 29)
         key = (doi_norm or "", pmid or "", title_norm or "")
         if key == ("", "", ""):
             continue
         if key in seen:
             continue
         seen.add(key)
+        doi_display = str(_cell(row, doi_idx) or "").strip() or doi_norm or ""
         studies.append({
             "doi_norm": doi_norm,
             "pmid": pmid,
             "title_norm": title_norm,
             "year": year,
-            "doi_display": str(row.get(doi_col, "") or "").strip() or doi_norm or "",
+            "doi_display": doi_display,
         })
+    wb.close()
     return studies
 
 

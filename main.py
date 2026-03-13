@@ -15,7 +15,7 @@ from gemini import (
     filter_extracted_terms,
 )
 from query_builder import build_query
-from pubmed import parse as parse_pdf_references, fetch_metadata_for_identifiers
+from pubmed import parse as parse_pdf_references, fetch_metadata_for_identifiers, _title_only_from_raw
 
 
 def _ref_cache_path(pdf_path: Path) -> Path:
@@ -45,12 +45,17 @@ def run(pdf_path: Path) -> None:
             print("No references could be parsed from the PDF; cannot build cache.")
             return
 
-        # 2) Build identifiers: DOI if present, else PMID, else authors+title
+        # 2) Build identifiers: DOI if present, else PMID, else title-only (no authors)
         identifiers = []
         for r in refs:
-            ident = (
-                (getattr(r, "doi", None) or getattr(r, "pmid", None) or getattr(r, "title", None)) or ""
-            ).strip()
+            doi = (getattr(r, "doi", None) or "").strip()
+            pmid = (getattr(r, "pmid", None) or "").strip()
+            if doi:
+                ident = doi
+            elif pmid:
+                ident = pmid
+            else:
+                ident = _title_only_from_raw(getattr(r, "raw", "") or "")
             if ident:
                 identifiers.append(ident)
 
@@ -68,8 +73,11 @@ def run(pdf_path: Path) -> None:
                 # Use metadata record as-is (includes title, abstract, mesh_terms)
                 references.append(meta)
             else:
-                # Fallback minimal record based on parsed reference
-                title = (getattr(ref, "title", None) or "").strip()
+                # Fallback minimal record — use title-only (no authors)
+                raw = getattr(ref, "raw", "") or ""
+                title = _title_only_from_raw(raw)
+                if not title:
+                    title = (getattr(ref, "title", None) or "").strip()
                 references.append(
                     {
                         "title": title,
@@ -85,9 +93,18 @@ def run(pdf_path: Path) -> None:
             references = json.load(f)
         print(f"Loaded {len(references)} references from {cache_path}\n")
 
+    total_refs = len(references)
+    references = [
+        r for r in references
+        if (r.get("abstract") or "").strip() or (r.get("mesh_terms") or [])
+    ]
+    print(f"References with abstract or MeSH: {len(references)} of {total_refs}\n")
+
+    _FACETS = ("population", "intervention", "comparator", "outcome")
+
     pico = pico_extractor(pdf_path)
     key_concepts = get_pico_keywords(pico)
-    pico_text = " ".join(str(pico.get(k, "")) for k in ("population", "intervention"))
+    pico_text = " ".join(str(pico.get(k, "")) for k in _FACETS)
     ref_docs = [_doc_for_ref(r) for r in references]
     docs = [pico_text] + ref_docs
     vectorizer = TfidfVectorizer(stop_words="english")
@@ -98,11 +115,13 @@ def run(pdf_path: Path) -> None:
     kept = [(rec, s) for rec, s in zip(references, sims) if s >= THRESHOLD]
 
     print("PICO:")
-    for key in ("population", "intervention"):
+    for key in _FACETS:
         print(f"  {key}: {pico.get(key, '')}")
     print("Key concepts (3 per facet):")
-    for key in ("population", "intervention"):
-        print(f"  {key}: {key_concepts.get(key, [])}")
+    for key in _FACETS:
+        kw = key_concepts.get(key, [])
+        if kw:
+            print(f"  {key}: {kw}")
     print(f"\nReferences with TF-IDF score >= {THRESHOLD}: {len(kept)} of {len(references)}\n")
     for rec, score in kept:
         title = (rec.get("title") or "").strip()
