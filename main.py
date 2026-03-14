@@ -16,6 +16,7 @@ from gemini import (
     filter_terms_by_key_concepts,
     filter_extracted_terms,
     extract_freetext_terms,
+    expand_terms_variants,
     extract_titles_from_references,
 )
 from query_builder import build_query
@@ -195,6 +196,14 @@ def run(pdf_path: Path) -> None:
         existing = list(terms.get(facet, {}).get("freetext") or [])
         added = extra_freetext.get(facet) or []
         terms.setdefault(facet, {"mesh": [], "freetext": []})
+        terms[facet]["freetext"] = list(dict.fromkeys(existing + added))
+
+    # ── 8c) Topic-anchored variant expansion ──────────────────────────────
+    print("Expanding terms with synonyms and variants (within review scope) …")
+    extra_variants = expand_terms_variants(terms, pico, key_concepts)
+    for facet in ("population", "intervention", "comparator", "outcome"):
+        existing = list(terms[facet].get("freetext") or [])
+        added = extra_variants.get(facet) or []
         terms[facet]["freetext"] = list(dict.fromkeys(existing + added))
 
     # ── 9) Build PubMed query ────────────────────────────────────────────

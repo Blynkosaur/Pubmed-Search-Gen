@@ -437,6 +437,78 @@ def extract_freetext_terms(
     return result
 
 
+def expand_terms_variants(
+    terms: Dict[str, Any],
+    pico: Dict[str, Any],
+    key_concepts: Dict[str, List[str]],
+) -> Dict[str, List[str]]:
+    """
+    Topic-anchored expansion: given PICO, key concepts, and current terms,
+    return additional freetext variants that stay within this review's scope.
+    Only adds terms that are direct synonyms/rephrasings of the same concepts.
+    Returns {facet: [additional freetext terms]} to merge into terms.
+    """
+    api_key = _load_api_key()
+    client = genai.Client(api_key=api_key)
+
+    facets_json: Dict[str, List[str]] = {}
+    for facet in _PICO_FACETS:
+        data = terms.get(facet) or {}
+        freetext = data.get("freetext") if isinstance(data, dict) else []
+        facets_json[facet] = list(freetext) if isinstance(freetext, list) else []
+
+    pico_block = "\n".join(
+        f"  {k}: {pico.get(k) or ''}" for k in _PICO_FACETS
+    )
+    concepts_block = "\n".join(
+        f"  {k}: {', '.join(key_concepts.get(k) or [])}"
+        for k in _PICO_FACETS
+    )
+
+    prompt = (
+        "You are improving recall for a systematic review search strategy.\n\n"
+        "This review's PICO (scope):\n"
+        f"{pico_block}\n\n"
+        "Key concepts per facet (anchor — stay close to these):\n"
+        f"{concepts_block}\n\n"
+        "Current freetext terms per facet:\n"
+        f"{json.dumps(facets_json, indent=2)}\n\n"
+        "Consider these dimensions when adding variants:\n"
+        "- Setting (e.g. primary care, emergency department, inpatient, community, in-hospital, out-of-hospital)\n"
+        "- Tool/method type (e.g. screening instrument, needs assessment, checklist, algorithm, natural language processing)\n"
+        "- Study framing (e.g. diagnostic accuracy, validation, content validity)\n"
+        "- Population wording (e.g. young families, families in primary care, age ranges, in-hospital vs out-of-hospital)\n\n"
+        "Your task: for each facet, decide which of these dimensions are clearly relevant to this review's topic. "
+        "Add ADDITIONAL terms only for dimensions that apply — direct synonyms, alternate phrasings, or abbreviations for the SAME concepts. "
+        "If a dimension is not relevant to this review, add nothing for it. Every added term must stay within the review's scope. "
+        "Do NOT add broader or generic terms. Do NOT repeat terms already given.\n"
+        "Add at most 10–15 additional terms per facet. Prefer phrases of 2+ words. Use empty array if no on-topic additions.\n\n"
+        "Return a JSON object with exactly four keys: population, intervention, comparator, outcome.\n"
+        "Each value must be an array of strings (additional freetext terms only).\n"
+        "Return only valid JSON, no markdown backticks."
+    )
+
+    response = client.models.generate_content(
+        model=_MODEL_NAME,
+        contents=prompt,
+        config={"response_mime_type": "application/json"},
+    )
+
+    raw_text = getattr(response, "text", None) or ""
+    if not raw_text.strip():
+        raw_text = str(response)
+    parsed = json.loads(raw_text)
+
+    result: Dict[str, List[str]] = {}
+    for facet in _PICO_FACETS:
+        arr = parsed.get(facet)
+        if isinstance(arr, list):
+            result[facet] = [str(x).strip() for x in arr if x and str(x).strip()]
+        else:
+            result[facet] = []
+    return result
+
+
 def filter_extracted_terms(
     terms: Dict[str, Dict[str, List[str]]],
     references: List[Dict[str, Any]],
