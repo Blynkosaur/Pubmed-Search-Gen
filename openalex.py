@@ -276,6 +276,19 @@ def build_citation_graph(
     return graph
 
 
+def find_doi_by_title(title: str) -> str | None:
+    """
+    Search OpenAlex by title and return the DOI of the first matching work, or None.
+    Useful when a seed study has title but no DOI (e.g. from Excel).
+    """
+    if not title or not title.strip():
+        return None
+    work = _lookup_by_title(title.strip())
+    if not work:
+        return None
+    return _extract_doi(work)
+
+
 def load_or_build_citation_graph(
     seed_refs: list[dict[str, str | None]],
     pdf_path: Path,

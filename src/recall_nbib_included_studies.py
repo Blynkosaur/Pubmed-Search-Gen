@@ -10,12 +10,15 @@ including PubMed ID) and one or more .nbib or .ris files. Reports:
   - Ratio = (included studies in bib) / (total studies in all bib files)
 
 Matching is done by normalized DOI and/or PubMed ID.
+
+Also supports: paste a PubMed query and compute recall vs the Excel (no .nbib/.ris).
 """
 
 import argparse
 import re
 import sys
 from pathlib import Path
+
 
 
 def normalize_doi(doi):
@@ -290,9 +293,93 @@ def count_matches(included_studies, by_doi, by_pmid, by_title):
     return sum(1 for s in included_studies if _is_found(s, by_doi, by_pmid, by_title))
 
 
+def recall_from_query(query: str, excel_path: Path, *, quiet: bool = False, list_all: bool = False):
+    """
+    Run a PubMed query and compute recall against an Included Studies Excel file.
+
+    - Runs the query via PubMed ESearch and gets result PMIDs.
+    - Loads included studies from the Excel; for those without PMID, resolves DOI→PMID.
+    - An included study counts as "found" if its PMID (or resolved PMID) is in the search results.
+    - Prints: total included, found, total search results, recall %.
+
+    Use this to paste a query and see how well it recalls the Excel's included studies.
+    """
+    # Import here so script works without pubmed when only using NBIB/RIS recall
+    project_root = Path(__file__).resolve().parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    from pubmed import esearch_query, dois_to_pmids
+
+    query = (query or "").strip()
+    if not query:
+        raise ValueError("query must be non-empty")
+    excel_path = Path(excel_path)
+    if not excel_path.exists():
+        raise FileNotFoundError(f"Excel file not found: {excel_path}")
+
+    included = load_included_studies(excel_path)
+    n_included = len(included)
+    if n_included == 0:
+        raise ValueError("No included studies found in Excel (no valid DOI or PubMed ID).")
+
+    # Resolve DOI → PMID for included studies that have DOI but no PMID
+    dois_to_resolve = [s["doi_norm"] for s in included if s.get("doi_norm") and not s.get("pmid")]
+    doi_to_pmid = {}
+    if dois_to_resolve:
+        doi_to_pmid = dois_to_pmids(dois_to_resolve)
+    for s in included:
+        if not s.get("pmid") and s.get("doi_norm"):
+            resolved = doi_to_pmid.get(s["doi_norm"].lower() if s["doi_norm"] else None)
+            if resolved:
+                s["pmid"] = resolved
+
+    # Run the query and get result PMIDs
+    result_pmids = esearch_query(query, retmax=10_000)
+    n_results = len(result_pmids)
+    by_pmid = set(result_pmids)
+    by_doi = set()
+    by_title = []
+
+    n_found = count_matches(included, by_doi, by_pmid, by_title)
+    recall_pct = 100.0 * n_found / n_included if n_included else 0.0
+    ratio = n_found / n_results if n_results else 0.0
+
+    if quiet:
+        print(f"{n_found}\t{n_included}\t{n_results}\t{recall_pct:.2f}\t{ratio:.4f}")
+        return
+
+    print("=== Recall: PubMed query vs Included Studies (Excel) ===\n")
+    print(f"Query: {query[:120]}{'...' if len(query) > 120 else ''}\n")
+    print(f"Included studies (Excel):       {n_included}")
+    print(f"Included studies found in query: {n_found}")
+    print(f"Total hits from PubMed query:   {n_results}")
+    print(f"Recall %:                       {recall_pct:.2f}%")
+    print(f"Ratio (found / query hits):      {ratio:.4f}")
+
+    not_found = [s for s in included if not _is_found(s, by_doi, by_pmid, by_title)]
+    if not_found:
+        print(f"\n--- NOT FOUND ({len(not_found)}) ---\n")
+        for i, s in enumerate(not_found, 1):
+            doi_display = (s.get("doi_display") or s.get("doi_norm") or "").strip()
+            pmid_display = s.get("pmid") or ""
+            title_preview = (s.get("title") or "")[:60]
+            if title_preview and len((s.get("title") or "")) > 60:
+                title_preview += "..."
+            print(f"  {i:2}. DOI={doi_display or '(none)'}  PMID={pmid_display or '(none)'}  {title_preview}")
+
+    if list_all:
+        print("\n--- All included studies: FOUND vs NOT FOUND ---\n")
+        for i, s in enumerate(included, 1):
+            found = _is_found(s, by_doi, by_pmid, by_title)
+            label = "FOUND" if found else "NOT FOUND"
+            doi_display = (s.get("doi_display") or s.get("doi_norm") or "").strip()
+            pmid_display = s.get("pmid") or ""
+            print(f"  {i:2}. [{label}] DOI={doi_display or '(none)'}  PMID={pmid_display or '(none)'}")
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Recall of NBIB/RIS files vs Included Studies Excel"
+        description="Recall of NBIB/RIS files vs Included Studies Excel. Or paste a PubMed query to get recall vs Excel.",
     )
     parser.add_argument(
         "excel",
@@ -301,9 +388,16 @@ def main():
     )
     parser.add_argument(
         "bib_files",
-        nargs="+",
+        nargs="*",
         type=Path,
-        help="One or more .nbib or .ris files",
+        help="One or more .nbib or .ris files (omit when using --query)",
+    )
+    parser.add_argument(
+        "--query",
+        type=str,
+        default=None,
+        metavar="QUERY",
+        help="PubMed boolean query. If set, run this query on PubMed and report recall vs Excel (no bib files needed).",
     )
     parser.add_argument(
         "-q", "--quiet",
@@ -319,6 +413,13 @@ def main():
 
     if not args.excel.exists():
         sys.exit(f"Excel file not found: {args.excel}")
+
+    if args.query is not None:
+        recall_from_query(args.query, args.excel, quiet=args.quiet, list_all=args.list)
+        return
+
+    if not args.bib_files:
+        sys.exit("Provide either --query <PubMed query> or one or more .nbib/.ris files.")
 
     included = load_included_studies(args.excel)
     n_included = len(included)

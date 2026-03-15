@@ -1,27 +1,26 @@
 from __future__ import annotations
 
 import argparse
-import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pymupdf
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 
 from gemini import (
     pico_extractor,
-    get_pico_keywords,
-    extract_terms,
-    filter_terms_by_key_concepts,
-    filter_extracted_terms,
-    extract_freetext_terms,
-    expand_terms_variants,
+    parse_prospero,
+    classify_seed_mesh_terms,
+    augment_seed_mesh_with_hop1,
+    extract_terms_from_abstract,
+    split_freetext_terms_by_pico,
     extract_titles_from_references,
+    add_wildcards,
+    clean_search_terms_for_pubmed,
+    build_pubmed_query,
 )
-from query_builder import build_query
 from pubmed import parse as parse_pdf_references
-from openalex import load_or_build_citation_graph
+from openalex import find_doi_by_title, load_or_build_citation_graph
 from src.recall_nbib_included_studies import get_n_random_studies
 
 _DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s\"'>]+\b", re.IGNORECASE)
@@ -40,21 +39,11 @@ def _extract_sr_doi(pdf_path: Path) -> str | None:
     return m.group(0).strip().rstrip(".") if m else None
 
 
-def _doc_for_ref(rec: dict) -> str:
-    """Use abstract if present, else mesh as text, else title."""
-    abstract = (rec.get("abstract") or "").strip()
-    if abstract:
-        return abstract
-    mesh = rec.get("mesh") or rec.get("mesh_terms") or []
-    if mesh:
-        return " ".join(str(m) for m in mesh if m)
-    return (rec.get("title") or "").strip()
-
-
 def run(
     pdf_path: Path,
     xlsx_path: Path | None = None,
     n_seeds: int | None = None,
+    prospero_path: Path | None = None,
 ) -> None:
     pdf_path = Path(pdf_path)
 
@@ -63,9 +52,25 @@ def run(
         xlsx_path = Path(xlsx_path)
         print(f"Loading {n_seeds} random seed studies from {xlsx_path.name} …")
         seed_refs = get_n_random_studies(xlsx_path, n_seeds)
+        # If DOI is missing but title is present, try to find DOI via OpenAlex search
+        for ref in seed_refs:
+            if ref.get("doi") or not (ref.get("title") or "").strip():
+                continue
+            title = (ref.get("title") or "").strip()
+            print(f"  Looking up DOI for: {title[:60]}…")
+            found_doi = find_doi_by_title(title)
+            if found_doi:
+                ref["doi"] = found_doi
+                print(f"  → Found DOI: {found_doi}")
+            else:
+                print(f"  → No DOI found on OpenAlex")
+        n_before = len(seed_refs)
         seed_refs = [
             s for s in seed_refs if s.get("doi") or (s.get("title") or "").strip()
         ]
+        n_dropped = n_before - len(seed_refs)
+        if n_dropped:
+            print(f"Dropped {n_dropped} study/studies with no DOI or title.")
         if not seed_refs:
             print("No studies with DOI or title in the spreadsheet.")
             return
@@ -132,8 +137,16 @@ def run(
         if n["hop"] == 0
     ]
 
+    hop1_refs = [
+        {"title": n["title"], "abstract": n["abstract"], "mesh_terms": n["mesh"]}
+        for n in graph.values()
+        if n["hop"] == 1
+    ]
+
+    # Hop-1 with ≥2 connections to hop-0 (used for MeSH augmentation and abstract terms)
     HOP1_MIN_CONNECTIONS = 2
-    hop1_filtered = []
+    hop1_connected_refs = []
+    hop1_three_plus_refs = []  # ≥3 connections (for abstract term extraction)
     for doi, n in graph.items():
         if n["hop"] != 1:
             continue
@@ -142,17 +155,25 @@ def run(
             if d in hop0_dois
         )
         if edges_to_hop0 >= HOP1_MIN_CONNECTIONS:
-            hop1_filtered.append(
-                {"title": n["title"], "abstract": n["abstract"], "mesh_terms": n["mesh"]}
-            )
+            ref = {"title": n["title"], "abstract": n["abstract"], "mesh_terms": n["mesh"]}
+            hop1_connected_refs.append(ref)
+            if edges_to_hop0 >= 3:
+                hop1_three_plus_refs.append(ref)
 
-    all_refs = hop0_refs + hop1_filtered
-    print(f"\nReferences for term extraction:")
+    # MeSH for augmentation: only from hop-1 nodes with ≥2 connections
+    hop1_mesh_set = set()
+    for r in hop1_connected_refs:
+        for m in r.get("mesh_terms") or r.get("mesh") or []:
+            if m and str(m).strip():
+                hop1_mesh_set.add(str(m).strip())
+
+    all_refs = hop0_refs + hop1_refs
+    print(f"\nReferences (all nodes, no filter):")
     print(f"  hop 0: {len(hop0_refs)}")
-    print(
-        f"  hop 1 (≥{HOP1_MIN_CONNECTIONS} connections to hop-0): "
-        f"{len(hop1_filtered)}"
-    )
+    print(f"  hop 1: {len(hop1_refs)}")
+    print(f"  hop 1 (≥{HOP1_MIN_CONNECTIONS} connections to hop-0): {len(hop1_connected_refs)}")
+    print(f"  hop 1 (≥3 connections, for abstract terms): {len(hop1_three_plus_refs)}")
+    print(f"  hop 1 MeSH set (≥{HOP1_MIN_CONNECTIONS} conn only, for augmentation): {len(hop1_mesh_set)} unique terms")
 
     # Keep only refs that have abstract or MeSH (title-only refs carry minimal signal)
     total_refs = len(all_refs)
@@ -168,67 +189,168 @@ def run(
         return
 
     # ── 6) PICO extraction from the SR ───────────────────────────────────
-    _FACETS = ("population", "intervention", "comparator", "outcome")
-
     pico = pico_extractor(pdf_path)
-    key_concepts = get_pico_keywords(pico)
-
     print("\nPICO:")
-    for key in _FACETS:
+
+    # ── 6b) Optional PROSPERO: extract author-provided terms (priority, no classification) ─
+    prospero_data = None
+    if prospero_path is not None:
+        prospero_path = Path(prospero_path)
+        if prospero_path.exists():
+            print(f"\nParsing PROSPERO registration: {prospero_path.name} …")
+            prospero_data = parse_prospero(prospero_path)
+            print("PROSPERO terms extracted (will be added with priority to final blocks).")
+        else:
+            print(f"\nPROSPERO path not found: {prospero_path}; skipping.")
+
+    if pico.get("summary"):
+        print(f"  summary: {pico.get('summary', '')}")
+    for key in ("population", "intervention", "comparator", "outcome"):
         print(f"  {key}: {pico.get(key, '')}")
-    print("Key concepts (3 per facet):")
-    for key in _FACETS:
-        kw = key_concepts.get(key, [])
-        if kw:
-            print(f"  {key}: {kw}")
 
-    # ── 7) TF-IDF similarity filter ──────────────────────────────────────
-    pico_text = " ".join(str(pico.get(k, "")) for k in _FACETS)
-    ref_docs = [_doc_for_ref(r) for r in references]
-    docs = [pico_text] + ref_docs
-    vectorizer = TfidfVectorizer(stop_words="english")
-    tfidf = vectorizer.fit_transform(docs)
-    sims = cosine_similarity(tfidf[0:1], tfidf[1:]).flatten()
+    # ── 7a) MeSH set from hop-0 seeds + Gemini classification ─────────────────
+    seed_mesh_set = set()
+    for r in hop0_refs:
+        for m in r.get("mesh_terms") or r.get("mesh") or []:
+            if m and str(m).strip():
+                seed_mesh_set.add(str(m).strip())
+    seed_mesh_list = sorted(seed_mesh_set)
+    print(f"\nSeed papers MeSH set: {len(seed_mesh_list)} unique terms")
+    classified = classify_seed_mesh_terms(seed_mesh_list, pico)
+    if prospero_data:
+        # PROSPERO MeSH into initial population/intervention sets (before augmentation)
+        classified["population"] = list(classified["population"]) + list(prospero_data["mesh_terms_population"])
+        classified["intervention"] = list(classified["intervention"]) + list(prospero_data["mesh_terms_intervention"])
+    print("\nClassified seed MeSH — population:", classified["population"])
+    print("Classified seed MeSH — intervention:", classified["intervention"])
+    print("Classified seed MeSH — others (discarded):", classified["others"])
 
-    THRESHOLD = 0.05
-    kept = [(rec, s) for rec, s in zip(references, sims) if s >= THRESHOLD]
-    print(
-        f"\nReferences with TF-IDF ≥ {THRESHOLD}: {len(kept)} of {len(references)}"
+    # Augment intervention only with hop1 MeSH; keep population MeSH as seed (no hop-1)
+    hop1_mesh_list = sorted(hop1_mesh_set)
+    print(f"\nAugmenting intervention with relevant terms from hop1 ({len(hop1_mesh_list)} terms); population MeSH unchanged …")
+    augmented = augment_seed_mesh_with_hop1(
+        pico,
+        classified["population"],
+        classified["intervention"],
+        hop1_mesh_list,
     )
-    for rec, score in kept:
-        title = (rec.get("title") or "").strip()
-        print(f"  {score:.4f}  {title[:90]}")
+    augmented["population"] = list(classified["population"])
+    print("Population MeSH (seed only):", augmented["population"])
+    print("Augmented intervention:", augmented["intervention"])
 
-    # ── 8) Term extraction + filtering via Gemini ────────────────────────
-    filtered_refs = [rec for rec, _ in kept]
-    terms = extract_terms(pico, filtered_refs)
-    terms = filter_terms_by_key_concepts(terms, key_concepts)
-    terms = filter_extracted_terms(terms, filtered_refs)
+    # ── 7c) Free terms from hop-0 abstracts: one concurrent Gemini call per abstract ─
+    hop0_abstracts = [(r.get("abstract") or "").strip() for r in hop0_refs]
+    hop0_with_abstract = [a for a in hop0_abstracts if a]
+    abstract_terms_set = set()
+    if hop0_with_abstract:
+        print(f"\nExtracting terms from {len(hop0_with_abstract)} hop-0 abstracts (concurrent, 5-8 terms each) …")
+        with ThreadPoolExecutor(max_workers=min(len(hop0_with_abstract), 10)) as executor:
+            futures = [executor.submit(extract_terms_from_abstract, ab, pico) for ab in hop0_with_abstract]
+            for fut in as_completed(futures):
+                try:
+                    abstract_terms_set.update(fut.result())
+                except Exception as e:
+                    print(f"  Abstract extraction failed: {e}")
+        print(f"Abstract-derived terms (hop-0): {len(abstract_terms_set)} unique terms")
 
-    # ── 8b) Dedicated freetext call for recall ───────────────────────────
-    print("Extracting additional freetext terms (recall-focused) …")
-    extra_freetext = extract_freetext_terms(pico, filtered_refs)
-    for facet in ("population", "intervention", "comparator", "outcome"):
-        existing = list(terms.get(facet, {}).get("freetext") or [])
-        added = extra_freetext.get(facet) or []
-        terms.setdefault(facet, {"mesh": [], "freetext": []})
-        terms[facet]["freetext"] = list(dict.fromkeys(existing + added))
+    # ── 7c2) Free terms from hop-1 (≥3 connections) abstracts: concurrent ─
+    hop1_three_abstracts = [(r.get("abstract") or "").strip() for r in hop1_three_plus_refs]
+    hop1_three_with_abstract = [a for a in hop1_three_abstracts if a]
+    if hop1_three_with_abstract:
+        print(f"\nExtracting terms from {len(hop1_three_with_abstract)} hop-1 (≥3 conn) abstracts (concurrent) …")
+        n_workers = min(len(hop1_three_with_abstract), 10)
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            futures = [executor.submit(extract_terms_from_abstract, ab, pico) for ab in hop1_three_with_abstract]
+            for fut in as_completed(futures):
+                try:
+                    abstract_terms_set.update(fut.result())
+                except Exception as e:
+                    print(f"  Abstract extraction failed: {e}")
+        print(f"Abstract-derived terms (hop-0 + hop-1 ≥3): {len(abstract_terms_set)} unique terms")
+    if prospero_data:
+        # PROSPERO freetext into initial freetext set (before split)
+        abstract_terms_set.update(prospero_data["population_terms"])
+        abstract_terms_set.update(prospero_data["intervention_terms"])
+        abstract_terms_set.update(prospero_data["search_terms"])
+    print("Abstract-derived terms:", sorted(abstract_terms_set))
 
-    # ── 8c) Topic-anchored variant expansion ──────────────────────────────
-    print("Expanding terms with synonyms and variants (within review scope) …")
-    extra_variants = expand_terms_variants(terms, pico, key_concepts)
-    for facet in ("population", "intervention", "comparator", "outcome"):
-        existing = list(terms[facet].get("freetext") or [])
-        added = extra_variants.get(facet) or []
-        terms[facet]["freetext"] = list(dict.fromkeys(existing + added))
+    # ── 7d) Split abstract-derived free terms into population vs intervention via Gemini ─
+    all_freetext_set = abstract_terms_set
+    split_freetext = {"population": [], "intervention": []}
+    if all_freetext_set:
+        print(f"\nCombined freetext terms: {len(all_freetext_set)} unique")
+        print("Free text:", sorted(all_freetext_set))
+        print("Splitting into population vs intervention (Gemini, PICO context) …")
+        split_freetext = split_freetext_terms_by_pico(sorted(all_freetext_set), pico)
+        print("Freetext — population:", split_freetext["population"])
+        print("Freetext — intervention:", split_freetext["intervention"])
 
-    # ── 9) Build PubMed query ────────────────────────────────────────────
-    query = build_query(terms)
+    # ── 7e) Final blocks: augmented + split_freetext, then PROSPERO terms with priority ─
+    final_population_mesh = set(augmented["population"])
+    final_population_freetext = set(split_freetext["population"])
+    final_intervention_mesh = set(augmented["intervention"])
+    final_intervention_freetext = set(split_freetext["intervention"])
 
-    print("\nExtracted search terms (filtered):")
-    print(json.dumps(terms, indent=2))
+    if prospero_data:
+        # PROSPERO terms bypass classification; add directly to final blocks
+        final_population_mesh.update(prospero_data["mesh_terms_population"])
+        final_population_freetext.update(prospero_data["population_terms"])
+        final_intervention_mesh.update(prospero_data["mesh_terms_intervention"])
+        final_intervention_freetext.update(prospero_data["intervention_terms"])
+        final_intervention_freetext.update(prospero_data["search_terms"])
+        if prospero_data["full_query"]:
+            print(f"\nPROSPERO full query found (reference only): {prospero_data['full_query'][:200]}…" if len(prospero_data["full_query"]) > 200 else f"\nPROSPERO full query found (reference only): {prospero_data['full_query']}")
+        print(f"\nPROSPERO population terms added: {prospero_data['population_terms']}")
+        print(f"PROSPERO intervention terms added: {prospero_data['intervention_terms']}")
+        if prospero_data["search_terms"]:
+            print(f"PROSPERO search terms added to intervention: {prospero_data['search_terms']}")
+        if prospero_data["mesh_terms_population"] or prospero_data["mesh_terms_intervention"]:
+            print(f"PROSPERO MeSH (population): {prospero_data['mesh_terms_population']}; (intervention): {prospero_data['mesh_terms_intervention']}")
+
+    print("\nFinal population (MeSH):", sorted(final_population_mesh))
+    print("Final population (freetext):", sorted(final_population_freetext))
+    print("Final intervention (MeSH):", sorted(final_intervention_mesh))
+    print("Final intervention (freetext):", sorted(final_intervention_freetext))
+
+    # ── 7f) Add wildcards to freetext only (before cleaning) ─
+    population_freetext_for_cleaning = sorted(final_population_freetext)
+    intervention_freetext_for_cleaning = sorted(final_intervention_freetext)
+    if population_freetext_for_cleaning:
+        print("\nAdding wildcards to population freetext (Gemini) …")
+        population_freetext_for_cleaning = add_wildcards(population_freetext_for_cleaning, pico)
+    if intervention_freetext_for_cleaning:
+        print("Adding wildcards to intervention freetext (Gemini) …")
+        intervention_freetext_for_cleaning = add_wildcards(intervention_freetext_for_cleaning, pico)
+
+    # ── 7g) Gemini cleaning: remove noise, keep only confident PICO-relevant terms ─
+    print("\nCleaning term lists for PubMed (Gemini) …")
+    cleaned = clean_search_terms_for_pubmed(
+        pico,
+        sorted(final_population_mesh),
+        population_freetext_for_cleaning,
+        sorted(final_intervention_mesh),
+        intervention_freetext_for_cleaning,
+    )
+    final_population_mesh = set(cleaned["population_mesh"])
+    final_population_freetext = set(cleaned["population_freetext"])
+    final_intervention_mesh = set(cleaned["intervention_mesh"])
+    final_intervention_freetext = set(cleaned["intervention_freetext"])
+    print("Cleaned population (MeSH):", sorted(final_population_mesh))
+    print("Cleaned population (freetext):", sorted(final_population_freetext))
+    print("Cleaned intervention (MeSH):", sorted(final_intervention_mesh))
+    print("Cleaned intervention (freetext):", sorted(final_intervention_freetext))
+
+    # ── 7h) Build PubMed boolean query from all term sets ─
+    print("\nBuilding PubMed boolean query (Gemini) …")
+    pubmed_query = build_pubmed_query(
+        sorted(final_population_mesh),
+        sorted(final_population_freetext),
+        sorted(final_intervention_mesh),
+        sorted(final_intervention_freetext),
+        pico,
+    )
     print("\nPubMed query:")
-    print(query)
+    print(pubmed_query)
 
 
 def main() -> None:
@@ -254,10 +376,16 @@ def main() -> None:
         metavar="N",
         help="Number of random seed studies to use from --xlsx. Requires --xlsx.",
     )
+    parser.add_argument(
+        "--prospero",
+        type=Path,
+        default=None,
+        help="Optional path to PROSPERO registration PDF. If provided, author terms are extracted and added with priority to final blocks.",
+    )
     args = parser.parse_args()
     if (args.xlsx is None) != (args.N is None):
         parser.error("--xlsx and --N must be given together.")
-    run(args.pdf, args.xlsx, args.N)
+    run(args.pdf, args.xlsx, args.N, args.prospero)
 
 
 if __name__ == "__main__":

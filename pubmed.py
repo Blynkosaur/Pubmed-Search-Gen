@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Union, Dict
+from typing import List, Optional, Union, Dict, Tuple, Any
 
 import pymupdf
 import re
@@ -331,6 +332,95 @@ def fetch_references_metadata(dois: List[str]) -> List[Dict[str, object]]:
         json.dump(records, f, ensure_ascii=False, indent=2)
 
     return records
+
+
+def esearch_count(query: str) -> int:
+    """
+    Run a PubMed ESearch and return only the result count (no IDs).
+    Uses retmax=0 to minimize response size.
+    """
+    if not query or not query.strip():
+        return 0
+    esearch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+    params = {
+        "db": "pubmed",
+        "term": query.strip(),
+        "retmax": "0",
+        "retmode": "json",
+    }
+    resp = requests.get(esearch_url, params=params, timeout=30)
+    resp.raise_for_status()
+    data = resp.json().get("esearchresult", {})
+    count = data.get("count", 0)
+    if isinstance(count, str):
+        try:
+            return int(count)
+        except ValueError:
+            return 0
+    return int(count) if count is not None else 0
+
+
+def fetch_esearch_counts_batched(
+    query_key_pairs: List[Tuple[str, Any]],
+    requests_per_sec: int = 10,
+) -> Dict[Any, int]:
+    """
+    Run esearch_count for each (query, key) concurrently in batches.
+    Returns dict mapping key -> count. Rate limit: requests_per_sec (default 10 for no API key).
+    """
+    if not query_key_pairs:
+        return {}
+    out: Dict[Any, int] = {}
+    batch_size = min(requests_per_sec, len(query_key_pairs))
+    interval = 1.0 / requests_per_sec if requests_per_sec else 1.0
+    for i in range(0, len(query_key_pairs), batch_size):
+        batch = query_key_pairs[i : i + batch_size]
+        with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+            futures = {executor.submit(esearch_count, q): k for q, k in batch}
+            for fut in as_completed(futures):
+                k = futures[fut]
+                try:
+                    out[k] = fut.result()
+                except Exception:
+                    out[k] = 0
+        if i + batch_size < len(query_key_pairs):
+            time.sleep(1.0)
+    return out
+
+
+def esearch_query(query: str, retmax: int = 10_000) -> List[str]:
+    """
+    Run a PubMed ESearch with the given boolean query. Returns list of PMIDs.
+    """
+    if not query or not query.strip():
+        return []
+    esearch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+    params = {
+        "db": "pubmed",
+        "term": query.strip(),
+        "retmax": str(min(retmax, 10000)),
+        "retmode": "json",
+    }
+    resp = requests.get(esearch_url, params=params, timeout=60)
+    resp.raise_for_status()
+    id_list = resp.json().get("esearchresult", {}).get("idlist", []) or []
+    return id_list
+
+
+def dois_to_pmids(dois: List[str]) -> Dict[str, str]:
+    """
+    Resolve DOIs to PMIDs via PubMed. Returns dict mapping normalized DOI -> PMID.
+    """
+    if not dois:
+        return {}
+    meta = fetch_references_metadata(dois)
+    out: Dict[str, str] = {}
+    for m in meta:
+        doi = m.get("doi")
+        pmid = m.get("pmid")
+        if doi and pmid:
+            out[doi.strip().lower()] = str(pmid).strip()
+    return out
 
 
 def _parse_pubmed_articles(root: ET.Element) -> List[Dict[str, object]]:
