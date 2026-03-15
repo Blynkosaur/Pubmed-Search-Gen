@@ -101,15 +101,39 @@ def load_included_studies(excel_path):
             continue
         seen.add(key)
         doi_display = str(_cell(row, doi_idx) or "").strip() or doi_norm or ""
+        title_raw = _cell(row, title_idx)
+        title_str = str(title_raw).strip() if title_raw is not None and not (isinstance(title_raw, float) and title_raw != title_raw) else ""
         studies.append({
             "doi_norm": doi_norm,
             "pmid": pmid,
             "title_norm": title_norm,
+            "title": title_str or None,
             "year": year,
             "doi_display": doi_display,
         })
     wb.close()
     return studies
+
+
+def get_n_random_studies(excel_path, n):
+    """
+    Load included studies from Excel and return n random rows as seed references
+    for the citation graph. Each item is {"doi": str|None, "title": str|None}
+    (format expected by OpenAlex build_citation_graph).
+    """
+    import random
+    studies = load_included_studies(excel_path)
+    if not studies:
+        return []
+    k = min(n, len(studies))
+    chosen = random.sample(studies, k)
+    return [
+        {
+            "doi": (s.get("doi_norm") or s.get("doi_display") or "").strip() or None,
+            "title": s.get("title") or s.get("title_norm") or None,
+        }
+        for s in chosen
+    ]
 
 
 def parse_ris_file(path):

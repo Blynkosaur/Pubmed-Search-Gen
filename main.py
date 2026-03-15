@@ -22,6 +22,7 @@ from gemini import (
 from query_builder import build_query
 from pubmed import parse as parse_pdf_references
 from openalex import load_or_build_citation_graph
+from src.recall_nbib_included_studies import get_n_random_studies
 
 _DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s\"'>]+\b", re.IGNORECASE)
 
@@ -50,46 +51,61 @@ def _doc_for_ref(rec: dict) -> str:
     return (rec.get("title") or "").strip()
 
 
-def run(pdf_path: Path) -> None:
+def run(
+    pdf_path: Path,
+    xlsx_path: Path | None = None,
+    n_seeds: int | None = None,
+) -> None:
     pdf_path = Path(pdf_path)
 
-    # 1) Parse references from the PDF
-    print(f"Parsing references from {pdf_path.name} …")
-    refs = parse_pdf_references(pdf_path)
-    if not refs:
-        print("No references parsed from the PDF.")
-        return
-    print(f"Parsed {len(refs)} references")
+    # 1) Seed refs: from Excel (N random) or from PDF references
+    if xlsx_path is not None and n_seeds is not None:
+        xlsx_path = Path(xlsx_path)
+        print(f"Loading {n_seeds} random seed studies from {xlsx_path.name} …")
+        seed_refs = get_n_random_studies(xlsx_path, n_seeds)
+        seed_refs = [
+            s for s in seed_refs if s.get("doi") or (s.get("title") or "").strip()
+        ]
+        if not seed_refs:
+            print("No studies with DOI or title in the spreadsheet.")
+            return
+        print(f"Using {len(seed_refs)} seed studies from Included Studies Excel")
+    else:
+        print(f"Parsing references from {pdf_path.name} …")
+        refs = parse_pdf_references(pdf_path)
+        if not refs:
+            print("No references parsed from the PDF.")
+            return
+        print(f"Parsed {len(refs)} references")
 
-    # 2) Build seed info for OpenAlex: DOI when available, else Gemini-extracted title
-    seed_refs: list[dict] = []
-    needs_title_indices: list[int] = []
-    needs_title_raws: list[str] = []
+        # Build seed info for OpenAlex: DOI when available, else Gemini-extracted title
+        seed_refs = []
+        needs_title_indices = []
+        needs_title_raws = []
+        for i, r in enumerate(refs):
+            doi = (r.doi or "").strip() or None
+            if doi:
+                seed_refs.append({"doi": doi, "title": None})
+            else:
+                seed_refs.append({"doi": None, "title": None})
+                needs_title_indices.append(i)
+                needs_title_raws.append(r.raw or "")
 
-    for i, r in enumerate(refs):
-        doi = (r.doi or "").strip() or None
-        if doi:
-            seed_refs.append({"doi": doi, "title": None})
-        else:
-            seed_refs.append({"doi": None, "title": None})
-            needs_title_indices.append(i)
-            needs_title_raws.append(r.raw or "")
+        if needs_title_raws:
+            print(
+                f"Extracting titles via Gemini for {len(needs_title_raws)} "
+                "references without DOI …"
+            )
+            gemini_titles = extract_titles_from_references(needs_title_raws)
+            for idx, title in zip(needs_title_indices, gemini_titles):
+                seed_refs[idx]["title"] = title
 
-    if needs_title_raws:
-        print(
-            f"Extracting titles via Gemini for {len(needs_title_raws)} "
-            "references without DOI …"
-        )
-        gemini_titles = extract_titles_from_references(needs_title_raws)
-        for idx, title in zip(needs_title_indices, gemini_titles):
-            seed_refs[idx]["title"] = title
-
-    seed_refs = [
-        s for s in seed_refs if s.get("doi") or (s.get("title") or "").strip()
-    ]
-    if not seed_refs:
-        print("No DOIs or titles found; cannot build citation graph.")
-        return
+        seed_refs = [
+            s for s in seed_refs if s.get("doi") or (s.get("title") or "").strip()
+        ]
+        if not seed_refs:
+            print("No DOIs or titles found; cannot build citation graph.")
+            return
 
     # 3) Extract the SR's own DOI so we can also seed papers that cite it
     sr_doi = _extract_sr_doi(pdf_path)
@@ -225,8 +241,23 @@ def main() -> None:
         required=True,
         help="Path to the systematic review PDF.",
     )
+    parser.add_argument(
+        "--xlsx",
+        type=Path,
+        default=None,
+        help="Path to Included Studies Excel file. If set, use --N random rows as seeds instead of PDF refs.",
+    )
+    parser.add_argument(
+        "--N",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Number of random seed studies to use from --xlsx. Requires --xlsx.",
+    )
     args = parser.parse_args()
-    run(args.pdf)
+    if (args.xlsx is None) != (args.N is None):
+        parser.error("--xlsx and --N must be given together.")
+    run(args.pdf, args.xlsx, args.N)
 
 
 if __name__ == "__main__":
