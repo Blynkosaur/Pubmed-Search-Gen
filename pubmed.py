@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Union, Dict
 
-import fitz  # PyMuPDF
+import pymupdf
 import re
 import json
 import hashlib
@@ -74,7 +74,7 @@ def _extract_pdf_text(pdf_path: Path) -> str:
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
-    doc = fitz.open(pdf_path)
+    doc = pymupdf.open(pdf_path)
     try:
         parts: List[str] = []
         for i in range(len(doc)):

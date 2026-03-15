@@ -5,7 +5,7 @@ import json
 import re
 from pathlib import Path
 
-import fitz
+import pymupdf
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -28,7 +28,7 @@ _DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s\"'>]+\b", re.IGNORECASE)
 
 def _extract_sr_doi(pdf_path: Path) -> str | None:
     """Try to find the SR's own DOI from the first two pages of the PDF."""
-    doc = fitz.open(pdf_path)
+    doc = pymupdf.open(pdf_path)
     try:
         text = ""
         for i in range(min(2, len(doc))):

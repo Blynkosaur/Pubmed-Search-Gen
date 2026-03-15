@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
-import fitz  # PyMuPDF
+import pymupdf
 from google import genai
 
 
@@ -50,7 +50,7 @@ def _extract_pdf_text(pdf_path: Path) -> str:
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
-    doc = fitz.open(pdf_path)
+    doc = pymupdf.open(pdf_path)
     try:
         parts = []
         for i in range(len(doc)):
