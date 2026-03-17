@@ -88,13 +88,14 @@ def pico_extractor(pdf_path: Union[str, Path]) -> Dict[str, object]:
         "own PICO: Population, Intervention, Comparator, and Outcome. Also provide\n"
         "a one-sentence summary of what the study is about.\n\n"
         "Return a JSON object with exactly these keys:\n"
-        '{\n'
+        "{\n"
         '  "summary": string (one sentence: what the study is about),\n'
         '  "population": string,\n'
         '  "intervention": string,\n'
         '  "comparator": string,\n'
         '  "outcome": string\n'
         "}\n\n"
+        "CRITICAL: Under NO CIRCUMSTANCES should the population field EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors (e.g., adults, children, elderly, male, female, Humans, adolescents, infants, neonatal, pediatric). Population must be defined solely by disease, condition, or procedure.\n\n"
         "If a facet is not applicable or not clearly stated, use an empty string.\n\n"
         "Manuscript text:\n"
         f"{truncated}\n\n"
@@ -146,14 +147,15 @@ def parse_prospero(pdf_path: Union[str, Path]) -> Dict[str, Any]:
         "- If the protocol mentions EXCLUDING a population, condition, or study type (e.g. 'we will exclude studies of pediatric cancer', 'excluding patients with X'), do NOT extract those as search terms. Only extract terms from inclusion criteria. Exclusion criteria define what the SR does NOT want — adding them to the search would broaden it incorrectly.\n\n"
         "What to extract (from inclusion criteria only):\n"
         "- Only extract disease names, condition synonyms, drug names, treatment names, and therapy types.\n"
-        "- Do NOT extract eligibility criteria (e.g. histologically confirmed, cytologically confirmed, patients 18 or above) UNLESS the SR specifically targets a demographic group (e.g. infants, pediatric, elderly).\n"
+        "- Do NOT extract eligibility criteria (e.g. histologically confirmed, cytologically confirmed, patients 18 or above)"
         "- Do NOT extract staging terms (e.g. Stage I, Stage II, Stage III).\n"
         "- Do NOT extract study design terms (e.g. RCT, clinical trials, randomized controlled trial).\n"
         "- Do NOT extract generic modifiers (e.g. in combination, monotherapy, resectable).\n"
         "- Do NOT extract outcome terms (e.g. overall survival, adverse events, pathological response).\n"
-        "- Do NOT extract \"Humans\" as a MeSH term.\n"
+        '- Do NOT extract "Humans" or "Adult" as a MeSH term.\n'
+        "- CRITICAL: Under NO CIRCUMSTANCES should population_terms EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors (e.g., adults, children, elderly, male, female, Humans, adolescents, infants, neonatal, pediatric). Population must be defined solely by disease, condition, or procedure.\n"
         "- Preserve hyphens exactly as written (e.g. anti-PD-1, PD-L1, CTLA-4).\n"
-        "- If a broad term has a more specific version that is relevant to this SR, extract only the specific version. For example: if the SR is about colorectal surgery, extract \"colorectal surgery\" not \"surgery\". If the SR is about preoperative fasting, extract \"preoperative fasting\" not \"fasting\". Always prefer the most specific form that appears in the document.\n\n"
+        '- If a broad term has a more specific version that is relevant to this SR, extract only the specific version. For example: if the SR is about colorectal surgery, extract "colorectal surgery" not "surgery". If the SR is about preoperative fasting, extract "preoperative fasting" not "fasting". Always prefer the most specific form that appears in the document.\n\n'
         "Return JSON only. Only extract what is explicitly written. Do not infer or generate new terms.\n"
         "{\n"
         '  "search_terms": [],\n'
@@ -209,7 +211,8 @@ def parse_prospero(pdf_path: Union[str, Path]) -> Dict[str, Any]:
         seen = set()
         out = []
         for x in items or []:
-            v = normalize_term(x) if isinstance(x, str) else normalize_term(str(x))
+            v = normalize_term(x) if isinstance(
+                x, str) else normalize_term(str(x))
             if v and v not in seen:
                 seen.add(v)
                 out.append(v)
@@ -239,8 +242,8 @@ def add_wildcards(terms: List[str], pico: Dict[str, Any]) -> List[str]:
 You are a systematic review librarian optimizing PubMed freetext search terms.
 
 PICO context:
-Population: {pico.get('population', '')}
-Intervention: {pico.get('intervention', '')}
+Population: {pico.get("population", "")}
+Intervention: {pico.get("intervention", "")}
 
 For each term below add a wildcard * where truncation improves recall in PubMed.
 
@@ -252,6 +255,7 @@ Rules:
 - For multi-word phrases only consider truncating the final word
 - Consider whether the truncated form would retrieve irrelevant results
 - Only add * when the benefit to recall clearly outweighs the risk of noise
+- CRITICAL: Under NO CIRCUMSTANCES should population terms EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors (e.g., adults, children, elderly, male, female, Humans, adolescents, infants, neonatal, pediatric). Population must be defined solely by disease, condition, or procedure.
 
 Terms: {terms}
 
@@ -284,7 +288,11 @@ Do not add new terms.
             return any(orig.startswith(stem) or stem == orig for orig in orig_set)
         return False
 
-    result = [str(t).strip() for t in parsed if isinstance(t, str) and is_valid(str(t).strip())]
+    result = [
+        str(t).strip()
+        for t in parsed
+        if isinstance(t, str) and is_valid(str(t).strip())
+    ]
     return result if result else list(terms)
 
 
@@ -310,17 +318,19 @@ Only curate the INTERVENTION lists below. Do not remove or change any population
 Intervention terms will be OR'd together. Every term independently matches papers. A single overly broad term can return thousands of irrelevant results.
 
 PICO:
-Population: {pico.get('population', '')}
-Intervention: {pico.get('intervention', '')}
-Comparator: {pico.get('comparator', '')}
-Outcome: {pico.get('outcome', '')}
+Population: {pico.get("population", "")}
+Intervention: {pico.get("intervention", "")}
+Comparator: {pico.get("comparator", "")}
+Outcome: {pico.get("outcome", "")}
 
-For INTERVENTION only, remove terms that are clearly off-topic or so broad they would match thousands of unrelated papers on their own (e.g. "water", "placebo", "adult", "insulin"). Specifically:
+For INTERVENTION only, remove terms that are clearly off-topic or so broad they would match thousands of unrelated papers on their own (e.g. "water", "placebo", "insulin"). Specifically:
 - Remove population/disease terms that belong in the population block (e.g. disease names) from the intervention list
 - Remove outcome or measurement terms (e.g. insulin resistance, blood glucose, survival)
 - Remove terms so generic they match huge swaths of unrelated literature (e.g. "surg*", "fast*", "treatment*", "patient*")
 - Remove MeSH terms that are parent categories far broader than the SR's actual topic
 - Remove a broad single-word term only when a more specific multi-word version already exists in the list (e.g. remove "Fasting" only if "preoperative fasting" exists)
+
+CRITICAL: Under NO CIRCUMSTANCES should population terms EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors (e.g., adults, children, elderly, male, female, Humans, adolescents, infants, neonatal, pediatric, aged, young adult, middle aged). Population must be defined solely by disease, condition, or procedure — not by demographics.
 
 Keep terms that are specific synonyms or alternate phrasings of the intervention, even if they seem redundant with other terms already in the list.
 Keep terms that describe the specific clinical context of this SR (e.g. ERAS, enhanced recovery pathways) as these help catch relevant papers that frame the intervention differently.
@@ -356,12 +366,22 @@ Return the population_mesh and population_freetext exactly as listed above. Only
     return {
         "population_mesh": list(population_mesh) if population_mesh else [],
         "population_freetext": list(population_freetext) if population_freetext else [],
-        "intervention_mesh": [t for t in (parsed.get("intervention_mesh") or []) if str(t).strip() in orig_im],
-        "intervention_freetext": [t for t in (parsed.get("intervention_freetext") or []) if str(t).strip() in orig_if],
+        "intervention_mesh": [
+            t
+            for t in (parsed.get("intervention_mesh") or [])
+            if str(t).strip() in orig_im
+        ],
+        "intervention_freetext": [
+            t
+            for t in (parsed.get("intervention_freetext") or [])
+            if str(t).strip() in orig_if
+        ],
     }
 
 
-def pick_primary_disease_mesh(pico: Dict[str, Any], population_mesh_list: List[str]) -> str | None:
+def pick_primary_disease_mesh(
+    pico: Dict[str, Any], population_mesh_list: List[str]
+) -> str | None:
     """
     Ask Gemini which of the seed population MeSH terms is the single best primary disease heading
     for the SR population. Returns that one term, or None if list is empty or response invalid.
@@ -376,6 +396,7 @@ def pick_primary_disease_mesh(pico: Dict[str, Any], population_mesh_list: List[s
         f"Given this SR population: {population_text}\n\n"
         f"Which of these MeSH terms is the single best primary disease heading for this population? "
         f"Pick one: {mesh_block}\n\n"
+        "CRITICAL: Under NO CIRCUMSTANCES should population terms EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors (e.g., adults, children, elderly, male, female, Humans, adolescents, infants, neonatal, pediatric). Population must be defined solely by disease, condition, or procedure.\n\n"
         "Return only the term, nothing else."
     )
     response = client.models.generate_content(
@@ -425,6 +446,7 @@ Rules:
 - Do not add NOT operators
 - Do not add study design filters
 - Your ONLY job is formatting, not curation
+- CRITICAL: Under NO CIRCUMSTANCES should population terms EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors (e.g., adults, children, elderly, male, female, Humans, adolescents, infants, neonatal, pediatric). Population must be defined solely by disease, condition, or procedure.
 - Return the query string only, no explanation, no markdown
 
 Population MeSH: {population_mesh}
@@ -483,7 +505,7 @@ def generate_search_terms_two_blocks(
 
     seed_mesh_block = "\n".join(f"- {t}" for t in seed_mesh_terms[:50])
     seed_abstracts_block = "\n\n---\n\n".join(
-        f"Abstract {i+1}:\n{a[:1500]}" for i, a in enumerate(seed_abstracts[:10])
+        f"Abstract {i + 1}:\n{a[:1500]}" for i, a in enumerate(seed_abstracts[:10])
     )
 
     prompt = (
@@ -496,20 +518,23 @@ def generate_search_terms_two_blocks(
         f"{seed_abstracts_block}\n\n"
         "Generate search terms for exactly 2 blocks:\n\n"
         "Block 1 — Population/Disease:\n"
-        "- 3-4 broad MeSH terms covering the disease and age group\n"
-        "- 4-5 broad free text synonyms for the disease and age group\n"
-        "- No phrases longer than 4 words\n\n"
+        "- 3-4 broad MeSH terms covering the disease"
+        "- 4-5 broad free text synonyms for the disease"
+        "- No phrases longer than 4 words\n"
+        "- CRITICAL: Under NO CIRCUMSTANCES should population terms EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors (e.g., adults, children, elderly, male, female, Humans, adolescents, infants, neonatal, pediatric). Population must be defined solely by disease, condition, or procedure.\n\n"
         "Block 2 — Intervention/Symptoms:\n"
         "- 3-4 specific MeSH terms for symptoms and diagnosis\n"
         "- Use exact clinical symptom names from the PICO intervention section as free text terms\n"
         "- Add: time to diagnosis, diagnostic delay, symptom\n"
-        "- No generic descriptors like \"red flag symptoms\" or \"presenting complaints\"\n"
+        '- No generic descriptors like "red flag symptoms" or "presenting complaints"\n'
         "- No phrases longer than 4 words\n\n"
         "Return JSON only:\n"
         '{"population": {"mesh": [], "freetext": []}, "intervention": {"mesh": [], "freetext": []}}'
     )
     if intervention_text:
-        prompt += f'\n\nPICO intervention (use exact symptom names from here): "{intervention_text}"'
+        prompt += f'\n\nPICO intervention (use exact symptom names from here): "{
+            intervention_text
+        }"'
 
     response = client.models.generate_content(
         model=_MODEL_NAME,
@@ -521,9 +546,15 @@ def generate_search_terms_two_blocks(
         raw_text = str(response)
     raw_text = raw_text.strip()
     if not raw_text:
-        return {"population": {"mesh": [], "freetext": []}, "intervention": {"mesh": [], "freetext": []}}
+        return {
+            "population": {"mesh": [], "freetext": []},
+            "intervention": {"mesh": [], "freetext": []},
+        }
     parsed = json.loads(raw_text)
-    out = {"population": {"mesh": [], "freetext": []}, "intervention": {"mesh": [], "freetext": []}}
+    out = {
+        "population": {"mesh": [], "freetext": []},
+        "intervention": {"mesh": [], "freetext": []},
+    }
     for block in ("population", "intervention"):
         data = parsed.get(block)
         if isinstance(data, dict):
@@ -562,7 +593,7 @@ Classify each MeSH term into one of: population, intervention, others.
 Rules:
 - "population" = the specific disease or condition being studied and its direct synonyms/subtypes.
 - "Humans" is never a defining characteristic of any SR population — always classify as others.
-- NEVER classify demographic terms as population or intervention. Demographic terms include: Humans, Male, Female, Adult, Young Adult, Middle Aged, Aged, Aged 80 and over, Adolescent, Child, Infant, Child Preschool, Infant Newborn. These are ALWAYS others — UNLESS the PICO population explicitly names that demographic as the subject of the review (e.g. "neonatal sepsis", "pediatric asthma", "geriatric depression"). Standard eligibility criteria like "patients over 18" or "adult patients" do NOT qualify.
+- CRITICAL: Under NO CIRCUMSTANCES should population terms EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors. Demographic terms include: Humans, Male, Female, Adult, Young Adult, Middle Aged, Aged, Aged 80 and over, Adolescent, Child, Infant, Child Preschool, Infant Newborn. These are ALWAYS others — no exceptions. Population must be defined solely by disease, condition, or procedure.
 - Study methodology terms (Prospective Studies, Retrospective Studies, Randomized Controlled Trials, Follow-Up Studies, Treatment Outcome, Prognosis, Survival Rate) are always others.
 - Generic parent terms (Neoplasms, Humans, Carcinoma) that are much broader than the SR's specific disease are others.
 - Staging/grading terms (Neoplasm Staging, Neoplasm Grading) are others unless staging is the intervention or primary focus of the SR.
@@ -592,7 +623,8 @@ Return JSON only with exactly three keys: population, intervention, others. Each
     for key in ("population", "intervention", "others"):
         arr = parsed.get(key)
         if isinstance(arr, list):
-            out[key] = [str(x).strip() for x in arr if str(x).strip() in mesh_set]
+            out[key] = [str(x).strip()
+                        for x in arr if str(x).strip() in mesh_set]
     return out
 
 
@@ -609,14 +641,19 @@ def augment_seed_mesh_with_hop1(
     relevant terms added to the appropriate list.
     """
     if not hop1_mesh_list:
-        return {"population": list(seed_population), "intervention": list(seed_intervention)}
+        return {
+            "population": list(seed_population),
+            "intervention": list(seed_intervention),
+        }
     api_key = _load_api_key()
     client = genai.Client(api_key=api_key)
     pico_block = "\n".join(
         f"  {k}: {v}" for k, v in pico.items() if isinstance(v, str) and v.strip()
     )
-    seed_pop_block = ", ".join(seed_population) if seed_population else "(none)"
-    seed_int_block = ", ".join(seed_intervention) if seed_intervention else "(none)"
+    seed_pop_block = ", ".join(
+        seed_population) if seed_population else "(none)"
+    seed_int_block = ", ".join(
+        seed_intervention) if seed_intervention else "(none)"
     hop1_block = "\n".join(f"- {t}" for t in sorted(hop1_mesh_list)[:500])
     prompt = (
         "You are a systematic review librarian augmenting search terms for a PubMed boolean query.\n\n"
@@ -635,7 +672,7 @@ def augment_seed_mesh_with_hop1(
         "- Do NOT add broad clinical setting terms (Preoperative Care, Perioperative Care, Postoperative Care, Administration Oral, Infusions Intravenous).\n"
         "- Do NOT add broad substance terms (Glucose, Water, Sodium Chloride) unless they ARE the specific intervention.\n"
         "- Do NOT add broad action terms (Eating, Drinking, Fasting, Exercise) unless they ARE the specific intervention or comparator.\n"
-        "- Do NOT add demographic terms (Humans, Male, Female, Adult, Aged, etc.).\n"
+        "- CRITICAL: Under NO CIRCUMSTANCES should population terms EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors (e.g., adults, children, elderly, male, female, Humans, adolescents, infants, neonatal, pediatric, Aged, Young Adult, Middle Aged). Population must be defined solely by disease, condition, or procedure.\n"
         "- Do NOT add study design or methodology terms.\n"
         "- When in doubt, do not add. Fewer specific terms is better than many broad terms.\n\n"
         "Return JSON only with two keys: population, intervention.\n"
@@ -662,12 +699,18 @@ def augment_seed_mesh_with_hop1(
     seed_pop_set = set(seed_population)
     seed_int_set = set(seed_intervention)
     if not raw_text:
-        return {"population": list(seed_population), "intervention": list(seed_intervention)}
+        return {
+            "population": list(seed_population),
+            "intervention": list(seed_intervention),
+        }
     try:
         parsed = json.loads(raw_text)
     except json.JSONDecodeError:
         # Model returned malformed JSON (e.g. unterminated string); skip augmentation
-        return {"population": list(seed_population), "intervention": list(seed_intervention)}
+        return {
+            "population": list(seed_population),
+            "intervention": list(seed_intervention),
+        }
     out_pop = list(seed_population)
     out_int = list(seed_intervention)
     for key, seed_set, out_list in (
@@ -712,9 +755,10 @@ def extract_terms_from_abstract(abstract: str, pico: Dict[str, Any]) -> List[str
         "- Do NOT extract outcome measures (e.g. overall survival, pathological response, adverse events, mortality, insulin resistance, blood glucose, length of stay).\n"
         "- Do NOT extract study design terms (e.g. RCT, clinical trials, meta-analysis, cohort).\n"
         "- Do NOT extract generic modifiers (e.g. in combination, monotherapy, resectable).\n"
-        "- If a broad term has a more specific version that is relevant to this SR, extract only the specific version. For example: if the SR is about colorectal surgery, extract \"colorectal surgery\" not \"surgery\". If the SR is about preoperative fasting, extract \"preoperative fasting\" not \"fasting\". Always prefer the most specific form that appears in the text.\n"
+        '- If a broad term has a more specific version that is relevant to this SR, extract only the specific version. For example: if the SR is about colorectal surgery, extract "colorectal surgery" not "surgery". If the SR is about preoperative fasting, extract "preoperative fasting" not "fasting". Always prefer the most specific form that appears in the text.\n'
         "- Do NOT extract side effects or safety terms (e.g. rash, irAEs, immunotherapy-related rash).\n"
-        "- Do NOT extract eligibility criteria or patient descriptors (e.g. patients 18 or above, histologically confirmed, cytologically confirmed) UNLESS the SR population specifically targets a demographic group (e.g. 'infants', 'pediatric', 'elderly'). If the PICO population defines itself by age or demographic, include that term.\n"
+        "- CRITICAL: Under NO CIRCUMSTANCES should population terms EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors (e.g., adults, children, elderly, male, female, Humans, adolescents, infants, neonatal, pediatric). Population must be defined solely by disease, condition, or procedure.\n"
+        "- Do NOT extract eligibility criteria or patient descriptors (e.g. patients 18 or above, histologically confirmed, cytologically confirmed).\n"
         "- Do NOT extract staging terms (e.g. Stage I, Stage II, Stage III, stage IIIA-N2).\n"
         "- Preserve hyphens exactly as written in the text (e.g. anti-PD-1, PD-L1, CTLA-4).\n"
         "- Single words or short phrases only. No sentences.\n"
@@ -724,7 +768,7 @@ def extract_terms_from_abstract(abstract: str, pico: Dict[str, Any]) -> List[str
         f"{pico_block}\n\n"
         "Abstract:\n"
         f"{text}\n\n"
-        "Return JSON only: {\"terms\": [\"term1\", \"term2\", ...]}"
+        'Return JSON only: {"terms": ["term1", "term2", ...]}'
     )
     response = client.models.generate_content(
         model=_MODEL_NAME,
@@ -759,7 +803,7 @@ def extract_terms_from_seed_titles(
     pico_block = "\n".join(
         f"  {k}: {v}" for k, v in pico.items() if isinstance(v, str) and v.strip()
     )
-    titles_block = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
+    titles_block = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(titles))
     prompt = f"""You are a systematic review librarian. Extract population and intervention search terms from these titles of included studies.
 
 PICO:
@@ -775,6 +819,7 @@ Rules:
 - Do NOT extract study design terms (e.g. randomized, controlled, trial, meta-analysis)
 - Do NOT extract generic words (e.g. effects, impact, role, patients)
 - Preserve hyphens and special characters exactly as written
+- CRITICAL: Under NO CIRCUMSTANCES should population terms EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors (e.g., adults, children, elderly, male, female, Humans, adolescents, infants, neonatal, pediatric). Population must be defined solely by disease, condition, or procedure.
 
 CRITICAL: Terms extracted from hop-0 seed titles are MANDATORY. They must appear in the final PubMed query no matter what. No downstream step — cleaning, deduplication, or filtering — is allowed to remove them. These terms come from confirmed included studies and represent how the SR's topic is actually described in the literature.
 
@@ -794,8 +839,16 @@ Return JSON: {{"population": [...], "intervention": [...]}}"""
     pop = parsed.get("population")
     interv = parsed.get("intervention")
     return {
-        "population": [str(t).strip() for t in (pop if isinstance(pop, list) else []) if t and str(t).strip()],
-        "intervention": [str(t).strip() for t in (interv if isinstance(interv, list) else []) if t and str(t).strip()],
+        "population": [
+            str(t).strip()
+            for t in (pop if isinstance(pop, list) else [])
+            if t and str(t).strip()
+        ],
+        "intervention": [
+            str(t).strip()
+            for t in (interv if isinstance(interv, list) else [])
+            if t and str(t).strip()
+        ],
     }
 
 
@@ -828,10 +881,11 @@ def extract_freetext_terms_from_titles(
         "Rules:\n"
         "- Do NOT extract generic terms (e.g. surgery, treatment, patients).\n"
         "- Do NOT extract outcome measures (e.g. insulin resistance, blood glucose, length of stay).\n"
-        "- If a broad term has a more specific version that is relevant to this SR, extract only the specific version. For example: if the SR is about colorectal surgery, extract \"colorectal surgery\" not \"surgery\". If the SR is about preoperative fasting, extract \"preoperative fasting\" not \"fasting\". Always prefer the most specific form that appears in the text.\n\n"
+        '- If a broad term has a more specific version that is relevant to this SR, extract only the specific version. For example: if the SR is about colorectal surgery, extract "colorectal surgery" not "surgery". If the SR is about preoperative fasting, extract "preoperative fasting" not "fasting". Always prefer the most specific form that appears in the text.\n'
+        "- CRITICAL: Under NO CIRCUMSTANCES should population terms EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors (e.g., adults, children, elderly, male, female, Humans, adolescents, infants, neonatal, pediatric). Population must be defined solely by disease, condition, or procedure.\n\n"
         "Titles:\n"
         f"{titles_block}\n\n"
-        "Return JSON only: a single object with one key \"terms\" whose value is an array of strings.\n"
+        'Return JSON only: a single object with one key "terms" whose value is an array of strings.\n'
         'Example: {"terms": ["early onset colorectal cancer", "diagnostic delay", "rectal bleeding", "time to diagnosis"]}'
     )
     response = client.models.generate_content(
@@ -872,19 +926,19 @@ def split_freetext_terms_by_pico(
     prompt = (
         "You are a systematic review librarian. We have a set of freetext search terms "
         "(from paper titles and abstracts). Split them into two lists using the PICO as context:\n\n"
-        "1. population — terms that describe the disease, condition, patient group, or age/setting.\n"
-        "2. intervention — terms that describe symptoms, signs, diagnostic process, time to diagnosis, delays, or exposure.\n\n"
+        "1. population — ONLY terms that define the primary disease/condition/procedure and its direct name variants. CRITICAL: Under NO CIRCUMSTANCES should population terms EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors (e.g., adults, children, elderly, male, female, Humans, adolescents, infants, neonatal, pediatric). Do NOT include any symptoms, comorbidities, or associated conditions (e.g. obesity, hypotonia, sleep apnea, scoliosis, cognitive disorders). Population must be defined solely by disease, condition, or procedure — not by demographics.\n"
+        "2. intervention — terms that describe the treatment, exposure, or diagnostic process being studied and its direct synonyms (drug names, therapy names, procedures). If a symptom is central to the SR's research question (e.g. diagnostic delay, time to diagnosis, a clinical sign being measured), classify it under intervention, not population.\n\n"
         "Put each term in exactly one list. Use the exact string from the list. "
         "If a term does not clearly fit either, omit it.\n\n"
         "Rules:\n"
         "- Do NOT put generic terms (e.g. surgery, treatment, patients) in either list — omit them.\n"
         "- Do NOT put outcome measures (e.g. insulin resistance, blood glucose, length of stay) in either list — omit them.\n"
-        "- If a broad term has a more specific version that is relevant to this SR, put only the specific version in the appropriate list. For example: if the SR is about colorectal surgery, use \"colorectal surgery\" not \"surgery\". If the SR is about preoperative fasting, use \"preoperative fasting\" not \"fasting\". Always prefer the most specific form.\n\n"
+        '- If a broad term has a more specific version that is relevant to this SR, put only the specific version in the appropriate list. For example: if the SR is about colorectal surgery, use "colorectal surgery" not "surgery". If the SR is about preoperative fasting, use "preoperative fasting" not "fasting". Always prefer the most specific form.\n\n'
         "PICO (context):\n"
         f"{pico_block}\n\n"
         "Freetext terms:\n"
         f"{terms_block}\n\n"
-        "Return JSON only: {\"population\": [\"term1\", ...], \"intervention\": [\"term1\", ...]}"
+        'Return JSON only: {"population": ["term1", ...], "intervention": ["term1", ...]}'
     )
     response = client.models.generate_content(
         model=_MODEL_NAME,
@@ -903,7 +957,8 @@ def split_freetext_terms_by_pico(
     for key in ("population", "intervention"):
         arr = parsed.get(key)
         if isinstance(arr, list):
-            out[key] = [str(x).strip() for x in arr if str(x).strip() in terms_set]
+            out[key] = [str(x).strip()
+                        for x in arr if str(x).strip() in terms_set]
     return out
 
 
@@ -930,6 +985,7 @@ def get_pico_keywords(pico: Dict[str, Any]) -> Dict[str, List[str]]:
         "For each PICO facet, give exactly three keywords or short phrases that best capture it. "
         "Use the most specific, searchable terms. If a facet is empty or not applicable, "
         "return an empty array for it.\n\n"
+        "CRITICAL: Under NO CIRCUMSTANCES should population terms EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors (e.g., adults, children, elderly, male, female, Humans, adolescents, infants, neonatal, pediatric). Population must be defined solely by disease, condition, or procedure.\n\n"
         "Return a JSON object with exactly four keys: population, intervention, comparator, outcome.\n"
         "Each value must be an array of exactly three strings (or empty if not applicable).\n"
         'Example: {"population":["heart transplant recipients","end-stage heart failure","cardiac transplantation"],'
@@ -954,9 +1010,17 @@ def get_pico_keywords(pico: Dict[str, Any]) -> Dict[str, List[str]]:
     for facet in _PICO_FACETS:
         arr = parsed.get(facet)
         if isinstance(arr, list) and len(arr) >= 3:
-            result[facet] = [str(arr[0]).strip(), str(arr[1]).strip(), str(arr[2]).strip()]
+            result[facet] = [
+                str(arr[0]).strip(),
+                str(arr[1]).strip(),
+                str(arr[2]).strip(),
+            ]
         elif isinstance(arr, list) and len(arr) == 2:
-            result[facet] = [str(arr[0]).strip(), str(arr[1]).strip(), str(arr[1]).strip()]
+            result[facet] = [
+                str(arr[0]).strip(),
+                str(arr[1]).strip(),
+                str(arr[1]).strip(),
+            ]
         elif isinstance(arr, list) and len(arr) == 1:
             v = str(arr[0]).strip()
             result[facet] = [v, v, v]
@@ -993,16 +1057,17 @@ def extract_terms(
         "Below are reference titles, abstracts, and MeSH terms from included or key papers.\n"
         "Extract search terms relevant to each PICO facet. For each facet provide:\n"
         "- mesh: MeSH terms that appear in the references' MeSH lists for that facet. "
-        "Include BOTH specific MeSH headings AND broader commonly-assigned ones (e.g. \"Prognosis\", \"Risk Factors\").\n"
+        'Include BOTH specific MeSH headings AND broader commonly-assigned ones (e.g. "Prognosis", "Risk Factors").\n'
         "- freetext: natural language phrases. IMPORTANT: include both general category terms "
-        "(e.g. \"risk score\", \"prognostic model\", \"prediction model\") AND specific named examples "
-        "(e.g. \"MELD score\", \"CARRS score\"). General terms are critical for recall.\n\n"
+        '(e.g. "risk score", "prognostic model", "prediction model") AND specific named examples '
+        '(e.g. "MELD score", "CARRS score"). General terms are critical for recall.\n\n'
         "Also provide study_design: one of randomized_controlled_trial, observational, systematic_review, or any.\n\n"
+        "CRITICAL: Under NO CIRCUMSTANCES should population terms EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors (e.g., adults, children, elderly, male, female, Humans, adolescents, infants, neonatal, pediatric). Population must be defined solely by disease, condition, or procedure.\n\n"
         "References (titles, abstracts, MeSH):\n"
         f"{refs_text}\n\n"
         "Return a JSON object with exactly five keys: study_design, population, intervention, comparator, outcome.\n"
         "study_design must be one of: randomized_controlled_trial, observational, systematic_review, any.\n"
-        "Each PICO facet must be an object with two keys: \"mesh\" (array of strings) and \"freetext\" (array of strings).\n"
+        'Each PICO facet must be an object with two keys: "mesh" (array of strings) and "freetext" (array of strings).\n'
         "If a facet is not applicable, use empty arrays.\n"
         "Return only valid JSON, no markdown backticks."
     )
@@ -1018,7 +1083,12 @@ def extract_terms(
         raw_text = str(response)
     parsed = json.loads(raw_text)
 
-    valid_designs = ("randomized_controlled_trial", "observational", "systematic_review", "any")
+    valid_designs = (
+        "randomized_controlled_trial",
+        "observational",
+        "systematic_review",
+        "any",
+    )
     study_design = str(parsed.get("study_design") or "any").strip().lower()
     if study_design not in valid_designs:
         study_design = "any"
@@ -1032,7 +1102,9 @@ def extract_terms(
         freetext = obj.get("freetext")
         result[facet] = {
             "mesh": [str(x) for x in mesh] if isinstance(mesh, list) else [],
-            "freetext": [str(x) for x in freetext] if isinstance(freetext, list) else [],
+            "freetext": [str(x) for x in freetext]
+            if isinstance(freetext, list)
+            else [],
         }
     return result
 
@@ -1054,22 +1126,26 @@ def filter_terms_by_key_concepts(
         kw = key_concepts.get(facet) or []
         concepts_str = ", ".join(kw) if kw else "(none / not applicable)"
         concept_lines.append(
-            f"Key concepts for {facet} (keep only terms that clearly relate to these): {concepts_str}"
+            f"Key concepts for {facet} (keep only terms that clearly relate to these): {
+                concepts_str
+            }"
         )
 
     prompt = (
         "You are filtering search terms to match key concepts only.\n\n"
-        + "\n".join(concept_lines) + "\n\n"
+        + "\n".join(concept_lines)
+        + "\n\n"
         "Current terms:\n"
         f"{terms_json}\n\n"
         "Return a JSON object with the same top-level keys "
         "(study_design, population, intervention, comparator, outcome).\n"
         "Preserve study_design exactly. For each PICO facet, keep only mesh and freetext terms "
         "that are related to the key concepts for that facet. Remove terms that are completely unrelated.\n"
-        "IMPORTANT: for each facet, keep BOTH general category terms (e.g. \"risk score\", \"prognosis\") "
+        'IMPORTANT: for each facet, keep BOTH general category terms (e.g. "risk score", "prognosis") '
         "AND specific named terms. Do NOT over-filter — it is better to keep a somewhat broader term "
         "than to miss relevant papers. If a facet has no key concepts, keep it empty.\n"
-        "Each facet must be {\"mesh\": [...], \"freetext\": [...]}.\n"
+        'Each facet must be {"mesh": [...], "freetext": [...]}.\n'
+        "CRITICAL: Under NO CIRCUMSTANCES should population terms EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors (e.g., adults, children, elderly, male, female, Humans, adolescents, infants, neonatal, pediatric). Population must be defined solely by disease, condition, or procedure.\n"
         "Return only valid JSON, no markdown backticks."
     )
 
@@ -1093,7 +1169,9 @@ def filter_terms_by_key_concepts(
             freetext = obj.get("freetext")
             result[facet] = {
                 "mesh": [str(x) for x in mesh] if isinstance(mesh, list) else [],
-                "freetext": [str(x) for x in freetext] if isinstance(freetext, list) else [],
+                "freetext": [str(x) for x in freetext]
+                if isinstance(freetext, list)
+                else [],
             }
         else:
             result[facet] = terms.get(facet, {"mesh": [], "freetext": []})
@@ -1150,7 +1228,9 @@ def extract_titles_from_references(raw_refs: List[str]) -> List[str]:
     return titles[: len(raw_refs)]
 
 
-def _refs_text_for_prompt(references: List[Dict[str, Any]], max_chars: int = 40_000) -> str:
+def _refs_text_for_prompt(
+    references: List[Dict[str, Any]], max_chars: int = 40_000
+) -> str:
     """Build concatenated title/abstract/MeSH text for reference list (for prompts)."""
     ref_parts: List[str] = []
     total = 0
@@ -1158,7 +1238,11 @@ def _refs_text_for_prompt(references: List[Dict[str, Any]], max_chars: int = 40_
         title = (ref.get("title") or "").strip()
         abstract = (ref.get("abstract") or "").strip()
         mesh = ref.get("mesh_terms")
-        mesh_str = "; ".join(str(m) for m in mesh if m) if isinstance(mesh, list) else str(mesh or "")
+        mesh_str = (
+            "; ".join(str(m) for m in mesh if m)
+            if isinstance(mesh, list)
+            else str(mesh or "")
+        )
         lines = [f"[Ref {i + 1}]", f"Title: {title}"]
         if abstract:
             lines.append(f"Abstract: {abstract}")
@@ -1200,13 +1284,14 @@ def extract_freetext_terms(
         "Below are reference titles and abstracts from included or key papers.\n"
         "Your task: list every distinct phrase, synonym, and variant that authors use "
         "in these texts to describe each PICO facet. Prioritize RECALL — include:\n"
-        "- Multiple ways of saying the same concept (e.g. \"risk score\", \"prognostic score\", \"prediction model\")\n"
-        "- Abbreviations and acronyms (prefer as part of a phrase, e.g. \"MELD score\", but include standalone if essential)\n"
-        "- Slight wording variants (e.g. \"heart transplant recipients\", \"patients undergoing heart transplantation\")\n"
+        '- Multiple ways of saying the same concept (e.g. "risk score", "prognostic score", "prediction model")\n'
+        '- Abbreviations and acronyms (prefer as part of a phrase, e.g. "MELD score", but include standalone if essential)\n'
+        '- Slight wording variants (e.g. "heart transplant recipients", "patients undergoing heart transplantation")\n'
         "Prefer phrases of 2 or more words where possible. Include both general category terms and specific named tools.\n\n"
         "Return a JSON object with exactly four keys: population, intervention, comparator, outcome.\n"
         "Each value must be an array of strings (freetext terms only; no MeSH).\n"
         "If a facet is not applicable, use an empty array.\n\n"
+        "CRITICAL: Under NO CIRCUMSTANCES should population terms EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors (e.g., adults, children, elderly, male, female, Humans, adolescents, infants, neonatal, pediatric). Population must be defined solely by disease, condition, or procedure.\n\n"
         "References (titles and abstracts):\n"
         f"{refs_text}\n\n"
         "Return only valid JSON, no markdown backticks."
@@ -1227,7 +1312,8 @@ def extract_freetext_terms(
     for facet in _PICO_FACETS:
         arr = parsed.get(facet)
         if isinstance(arr, list):
-            result[facet] = [str(x).strip() for x in arr if x and str(x).strip()]
+            result[facet] = [str(x).strip()
+                             for x in arr if x and str(x).strip()]
         else:
             result[facet] = []
     return result
@@ -1251,14 +1337,12 @@ def expand_terms_variants(
     for facet in _PICO_FACETS:
         data = terms.get(facet) or {}
         freetext = data.get("freetext") if isinstance(data, dict) else []
-        facets_json[facet] = list(freetext) if isinstance(freetext, list) else []
+        facets_json[facet] = list(freetext) if isinstance(
+            freetext, list) else []
 
-    pico_block = "\n".join(
-        f"  {k}: {pico.get(k) or ''}" for k in _PICO_FACETS
-    )
+    pico_block = "\n".join(f"  {k}: {pico.get(k) or ''}" for k in _PICO_FACETS)
     concepts_block = "\n".join(
-        f"  {k}: {', '.join(key_concepts.get(k) or [])}"
-        for k in _PICO_FACETS
+        f"  {k}: {', '.join(key_concepts.get(k) or [])}" for k in _PICO_FACETS
     )
 
     prompt = (
@@ -1279,6 +1363,7 @@ def expand_terms_variants(
         "If a dimension is not relevant to this review, add nothing for it. Every added term must stay within the review's scope. "
         "Do NOT add broader or generic terms. Do NOT repeat terms already given.\n"
         "Add at most 10–15 additional terms per facet. Prefer phrases of 2+ words. Use empty array if no on-topic additions.\n\n"
+        "CRITICAL: Under NO CIRCUMSTANCES should population terms EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors (e.g., adults, children, elderly, male, female, Humans, adolescents, infants, neonatal, pediatric). Population must be defined solely by disease, condition, or procedure.\n\n"
         "Return a JSON object with exactly four keys: population, intervention, comparator, outcome.\n"
         "Each value must be an array of strings (additional freetext terms only).\n"
         "Return only valid JSON, no markdown backticks."
@@ -1299,7 +1384,8 @@ def expand_terms_variants(
     for facet in _PICO_FACETS:
         arr = parsed.get(facet)
         if isinstance(arr, list):
-            result[facet] = [str(x).strip() for x in arr if x and str(x).strip()]
+            result[facet] = [str(x).strip()
+                             for x in arr if x and str(x).strip()]
         else:
             result[facet] = []
     return result
@@ -1322,12 +1408,13 @@ def filter_extracted_terms(
     rules = (
         "Rules for term selection:\n"
         "- Population: include only terms that define who the patients are "
-        "(diagnoses, conditions, procedures that determine eligibility). Exclude demographic terms, "
-        "generic terms like \"adult\" or \"patient\", and terms that describe treatments or interventions.\n"
+        "(diagnoses, conditions, procedures that determine eligibility). "
+        "CRITICAL: Under NO CIRCUMSTANCES should population terms EVER include demographic information such as age, sex, race, ethnicity, or general human descriptors (e.g., adults, children, elderly, male, female, Humans, adolescents, infants, neonatal, pediatric). Population must be defined solely by disease, condition, or procedure. "
+        'Exclude generic terms like "patient", and terms that describe treatments or interventions.\n'
         "- Intervention: include terms that define the core mechanism or modality "
         "of the intervention — what makes it distinct. IMPORTANT: always include BOTH general category terms "
-        "(e.g. \"risk score\", \"prognostic model\", \"prediction model\") AND specific named examples "
-        "(e.g. \"MELD score\", \"APACHE II\"). General terms are essential for recall — "
+        '(e.g. "risk score", "prognostic model", "prediction model") AND specific named examples '
+        '(e.g. "MELD score", "APACHE II"). General terms are essential for recall — '
         "specific named tools alone will miss many relevant studies that use different tools for the same purpose.\n"
         "- Comparator: include only terms that define what the intervention is compared against "
         "(e.g. placebo, standard care, alternative treatment). If none, leave empty.\n"
@@ -1337,7 +1424,7 @@ def filter_extracted_terms(
         "- Do not include short abbreviations as standalone freetext — they are too ambiguous. "
         "Only include them if combined with other words.\n"
         "- For MeSH: prefer specific MeSH headings but also keep broader ones that are commonly assigned "
-        "to relevant papers (e.g. \"Prognosis\", \"Risk Factors\"). Do NOT drop a MeSH term just because "
+        'to relevant papers (e.g. "Prognosis", "Risk Factors"). Do NOT drop a MeSH term just because '
         "it is broad — if it appears frequently in the references' MeSH lists, keep it.\n"
     )
 
@@ -1349,7 +1436,7 @@ def filter_extracted_terms(
         "Reference titles, abstracts, and MeSH (use to prefer frequently appearing terms):\n"
         f"{refs_text}\n\n"
         "Return a JSON object with exactly four keys: population, intervention, comparator, outcome.\n"
-        "Each value must be an object with two keys: \"mesh\" (array of strings) and \"freetext\" (array of strings).\n"
+        'Each value must be an object with two keys: "mesh" (array of strings) and "freetext" (array of strings).\n'
         "Apply the rules above and keep 6-10 terms per list. Return only valid JSON, no markdown backticks."
     )
 
@@ -1374,7 +1461,8 @@ def filter_extracted_terms(
         freetext = obj.get("freetext")
         result[facet] = {
             "mesh": [str(x) for x in mesh] if isinstance(mesh, list) else [],
-            "freetext": [str(x) for x in freetext] if isinstance(freetext, list) else [],
+            "freetext": [str(x) for x in freetext]
+            if isinstance(freetext, list)
+            else [],
         }
     return result
-

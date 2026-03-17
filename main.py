@@ -366,6 +366,120 @@ def run(
     final_population_freetext = set(cleaned["population_freetext"]) | seed_title_population_wc
     final_intervention_mesh = set(cleaned["intervention_mesh"])
     final_intervention_freetext = set(cleaned["intervention_freetext"]) | seed_title_intervention_wc
+
+    # Demographic hard ban for population (MeSH + freetext), after cleaning, before query building.
+    banned_mesh_demo = {
+        "humans",
+        "male",
+        "female",
+        "adult",
+        "young adult",
+        "middle aged",
+        "aged",
+        "aged 80 and over",
+        "adolescent",
+        "child",
+        "child preschool",
+        "infant",
+        "infant newborn",
+        "pregnancy",
+    }
+    banned_freetext_bases = {
+        "adult",
+        "adults",
+        "adult life",
+        "child",
+        "children",
+        "children and adolescents",
+        "adolescent",
+        "adolescents",
+        "adolescence",
+        "infant",
+        "infants",
+        "infancy",
+        "infants and toddlers",
+        "toddlers",
+        "neonatal",
+        "neonate",
+        "neonates",
+        "pediatric",
+        "paediatric",
+        "childhood",
+        "newborn",
+        "newborns",
+        "elderly",
+        "geriatric",
+        "young adult",
+        "middle aged",
+        "pregnant",
+        "pregnancy",
+    }
+
+    # Seed population keywords from seed titles + PICO population, used to preserve disease-specific phrases.
+    seed_keywords: set[str] = set()
+    pop_text = (pico.get("population") or "").lower()
+    for text in list(seed_title_population or []) + [pop_text]:
+        for token in re.split(r"[^a-z0-9]+", text.lower()):
+            token = token.strip()
+            if len(token) >= 4:
+                seed_keywords.add(token)
+
+    def _is_demo_freetext(term: str) -> bool:
+        base = term.rstrip("*").lower().strip()
+        if not base:
+            return False
+        # Keep if any seed keyword appears in the term (disease-specific phrase).
+        if any(kw in base for kw in seed_keywords):
+            return False
+        return any(base == b or base.startswith(b) for b in banned_freetext_bases)
+
+    # Apply demographic ban to population
+    before_mesh = len(final_population_mesh)
+    final_population_mesh = {
+        t
+        for t in final_population_mesh
+        if t.strip().lower() not in banned_mesh_demo
+    }
+    removed_mesh = before_mesh - len(final_population_mesh)
+
+    before_free = len(final_population_freetext)
+    final_population_freetext = {
+        t
+        for t in final_population_freetext
+        if not _is_demo_freetext(t)
+    }
+    removed_free = before_free - len(final_population_freetext)
+    if removed_mesh or removed_free:
+        print(
+            f"Demographic ban removed {removed_mesh} population MeSH term(s) and "
+            f"{removed_free} population freetext term(s)."
+        )
+
+    # Apply the same demographic ban to intervention (no seed-keyword exception; demographics are never useful)
+    before_int_mesh = len(final_intervention_mesh)
+    final_intervention_mesh = {
+        t
+        for t in final_intervention_mesh
+        if t.strip().lower() not in banned_mesh_demo
+    }
+    removed_int_mesh = before_int_mesh - len(final_intervention_mesh)
+
+    before_int_free = len(final_intervention_freetext)
+    final_intervention_freetext = {
+        t
+        for t in final_intervention_freetext
+        if not any(
+            t.rstrip("*").lower().strip().startswith(b) or t.rstrip("*").lower().strip() == b
+            for b in banned_freetext_bases
+        )
+    }
+    removed_int_free = before_int_free - len(final_intervention_freetext)
+    if removed_int_mesh or removed_int_free:
+        print(
+            f"Demographic ban removed {removed_int_mesh} intervention MeSH term(s) and "
+            f"{removed_int_free} intervention freetext term(s)."
+        )
+
     print("Cleaned population (MeSH):", sorted(final_population_mesh))
     print("Cleaned population (freetext):", sorted(final_population_freetext))
     print("Cleaned intervention (MeSH):", sorted(final_intervention_mesh))
