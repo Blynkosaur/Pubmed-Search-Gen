@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import shlex
+import subprocess
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -391,6 +394,7 @@ def fetch_esearch_counts_batched(
 def esearch_query(query: str, retmax: int = 10_000) -> List[str]:
     """
     Run a PubMed ESearch with the given boolean query. Returns list of PMIDs.
+    Single request; max 10,000 per request. Use esearch_query_all to fetch every result.
     """
     if not query or not query.strip():
         return []
@@ -405,6 +409,105 @@ def esearch_query(query: str, retmax: int = 10_000) -> List[str]:
     resp.raise_for_status()
     id_list = resp.json().get("esearchresult", {}).get("idlist", []) or []
     return id_list
+
+
+def _normalize_query_for_esearch(query: str) -> str:
+    """Collapse newlines and extra spaces so the API receives a single line (avoids JSON echo with control chars)."""
+    return " ".join((query or "").split())
+
+
+def esearch_query_all_edirect(query: str) -> tuple[Optional[List[str]], Optional[str]]:
+    """
+    Use EDirect (esearch | efetch -format uid) to retrieve ALL PMIDs for a query.
+    EDirect batches automatically and can return more than 10,000 records.
+    Returns (list of PMIDs, None) on success, or (None, error_message) if unavailable or failed.
+    """
+    query = _normalize_query_for_esearch(query)
+    if not query:
+        return ([], None)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write(query)
+        query_path = f.name
+    try:
+        cmd = f'esearch -db pubmed -query "$(cat {shlex.quote(query_path)})" | efetch -format uid'
+        result = subprocess.run(
+            ["bash", "-c", cmd],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or "unknown").strip() or f"exit code {result.returncode}"
+            return (None, err)
+        pmids = [line.strip() for line in result.stdout.splitlines() if line.strip() and line.strip().isdigit()]
+        return (pmids, None)
+    except FileNotFoundError:
+        return (None, "esearch/efetch not found (install EDirect and add to PATH)")
+    except subprocess.TimeoutExpired:
+        return (None, "EDirect timed out")
+    except OSError as e:
+        return (None, str(e))
+    finally:
+        Path(query_path).unlink(missing_ok=True)
+
+
+def esearch_query_all(
+    query: str,
+    retmax_per_request: int = 10_000,
+) -> List[str]:
+    """
+    Return ALL result PMIDs for a PubMed query. Tries EDirect first (no 10k limit);
+    if EDirect is not available, falls back to E-utilities API (capped at 10,000).
+    """
+    pmids, _, _ = esearch_query_all_with_source(query, retmax_per_request)
+    return pmids
+
+
+def esearch_query_all_with_source(
+    query: str,
+    retmax_per_request: int = 10_000,
+) -> tuple[List[str], str, Optional[str]]:
+    """
+    Return (list of PMIDs, source, fallback_reason).
+    source is "edirect" or "api". When source is "api", fallback_reason explains why EDirect wasn't used.
+    """
+    query = _normalize_query_for_esearch(query)
+    if not query:
+        return ([], "api", None)
+    edirect_result, edirect_error = esearch_query_all_edirect(query)
+    if edirect_result is not None:
+        return (edirect_result, "edirect", None)
+    esearch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+    all_ids: List[str] = []
+    retstart = 0
+    while True:
+        params = {
+            "db": "pubmed",
+            "term": query,
+            "retstart": str(retstart),
+            "retmax": str(retmax_per_request),
+            "retmode": "json",
+        }
+        resp = requests.get(esearch_url, params=params, timeout=90)
+        resp.raise_for_status()
+        try:
+            data = resp.json().get("esearchresult", {})
+        except Exception as e:
+            raw = resp.text
+            sanitized = re.sub(r"[\r\n]+", " ", raw)
+            try:
+                data = json.loads(sanitized).get("esearchresult", {})
+            except Exception:
+                raise ValueError(f"PubMed response had invalid JSON (control chars?). Query was normalized to one line. Original: {e}") from e
+        id_list = data.get("idlist", []) or []
+        if not id_list:
+            break
+        all_ids.extend(id_list)
+        retstart += len(id_list)
+        if len(id_list) < 9999:
+            break
+        time.sleep(0.34)
+    return (all_ids, "api", edirect_error)
 
 
 def dois_to_pmids(dois: List[str]) -> Dict[str, str]:

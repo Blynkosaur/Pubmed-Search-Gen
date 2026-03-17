@@ -12,6 +12,9 @@ including PubMed ID) and one or more .nbib or .ris files. Reports:
 Matching is done by normalized DOI and/or PubMed ID.
 
 Also supports: paste a PubMed query and compute recall vs the Excel (no .nbib/.ris).
+
+For query recall, results are uncapped only if NCBI EDirect (esearch/efetch) is
+installed and on PATH; otherwise the E-utilities API is used (max 10,000 results).
 """
 
 import argparse
@@ -308,7 +311,7 @@ def recall_from_query(query: str, excel_path: Path, *, quiet: bool = False, list
     project_root = Path(__file__).resolve().parent.parent
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
-    from pubmed import esearch_query, dois_to_pmids
+    from pubmed import esearch_query_all_with_source, dois_to_pmids
 
     query = (query or "").strip()
     if not query:
@@ -333,9 +336,15 @@ def recall_from_query(query: str, excel_path: Path, *, quiet: bool = False, list
             if resolved:
                 s["pmid"] = resolved
 
-    # Run the query and get result PMIDs
-    result_pmids = esearch_query(query, retmax=10_000)
+    # Run the query and get all result PMIDs (EDirect = no limit; API = max 10k)
+    result_pmids, source, fallback_reason = esearch_query_all_with_source(query)
     n_results = len(result_pmids)
+    if source == "edirect":
+        print("Using EDirect: retrieved all result PMIDs.", file=sys.stderr)
+    else:
+        print("EDirect not available; using API (max 10,000 results).", file=sys.stderr)
+        if fallback_reason:
+            print(f"  Reason: {fallback_reason}", file=sys.stderr)
     by_pmid = set(result_pmids)
     by_doi = set()
     by_title = []

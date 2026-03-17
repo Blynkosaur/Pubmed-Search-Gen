@@ -13,6 +13,7 @@ from gemini import (
     classify_seed_mesh_terms,
     augment_seed_mesh_with_hop1,
     extract_terms_from_abstract,
+    extract_terms_from_seed_titles,
     split_freetext_terms_by_pico,
     extract_titles_from_references,
     add_wildcards,
@@ -124,56 +125,62 @@ def run(
 
     hop0_count = sum(1 for n in graph.values() if n["hop"] == 0)
     hop1_count = sum(1 for n in graph.values() if n["hop"] == 1)
+    hop2_count = sum(1 for n in graph.values() if n["hop"] == 2)
+    hop3_count = sum(1 for n in graph.values() if n["hop"] == 3)
     print(f"\nCitation graph: {len(graph)} total nodes")
     print(f"  hop 0 (seeds): {hop0_count}")
-    print(f"  hop 1 (neighbors): {hop1_count}")
+    print(f"  hop 1 (papers that cite seeds): {hop1_count}")
+    print(f"  hop 2 (top 30 refs of hop-1): {hop2_count}")
+    print(f"  hop 3 (top 10 by connections to top 30): {hop3_count}")
 
-    # ── 5) Build reference lists from graph ──────────────────────────────
-    hop0_dois = {doi for doi, n in graph.items() if n["hop"] == 0}
-
+    # ── 5) Build reference lists; pipeline uses hop 0 + top 30 (hop 2) + top 10 (hop 3) ─
     hop0_refs = [
         {"title": n["title"], "abstract": n["abstract"], "mesh_terms": n["mesh"]}
         for n in graph.values()
         if n["hop"] == 0
     ]
 
-    hop1_refs = [
+    hop2_refs = [
         {"title": n["title"], "abstract": n["abstract"], "mesh_terms": n["mesh"]}
         for n in graph.values()
-        if n["hop"] == 1
+        if n["hop"] == 2
     ]
 
-    # Hop-1 with ≥2 connections to hop-0 (used for MeSH augmentation and abstract terms)
-    HOP1_MIN_CONNECTIONS = 2
-    hop1_connected_refs = []
-    hop1_three_plus_refs = []  # ≥3 connections (for abstract term extraction)
-    for doi, n in graph.items():
-        if n["hop"] != 1:
-            continue
-        edges_to_hop0 = sum(
-            1 for d in n.get("cited_by", []) + n.get("cites", [])
-            if d in hop0_dois
-        )
-        if edges_to_hop0 >= HOP1_MIN_CONNECTIONS:
-            ref = {"title": n["title"], "abstract": n["abstract"], "mesh_terms": n["mesh"]}
-            hop1_connected_refs.append(ref)
-            if edges_to_hop0 >= 3:
-                hop1_three_plus_refs.append(ref)
+    hop3_refs = [
+        {"title": n["title"], "abstract": n["abstract"], "mesh_terms": n["mesh"]}
+        for n in graph.values()
+        if n["hop"] == 3
+    ]
 
-    # MeSH for augmentation: only from hop-1 nodes with ≥2 connections
-    hop1_mesh_set = set()
-    for r in hop1_connected_refs:
+    # MeSH for augmentation: from hop-2 (top 30) + hop-3 (top 10)
+    hop2_mesh_set = set()
+    hop3_mesh_set = set()
+    for r in hop2_refs:
         for m in r.get("mesh_terms") or r.get("mesh") or []:
             if m and str(m).strip():
-                hop1_mesh_set.add(str(m).strip())
+                hop2_mesh_set.add(str(m).strip())
+    for r in hop3_refs:
+        for m in r.get("mesh_terms") or r.get("mesh") or []:
+            if m and str(m).strip():
+                hop3_mesh_set.add(str(m).strip())
+    hop2_hop3_mesh_set = hop2_mesh_set | hop3_mesh_set
 
-    all_refs = hop0_refs + hop1_refs
-    print(f"\nReferences (all nodes, no filter):")
+    all_refs = hop0_refs + hop2_refs + hop3_refs
+    print(f"\nReferences used in pipeline (hop 0 + top 30 hop-2 + top 10 hop-3):")
     print(f"  hop 0: {len(hop0_refs)}")
-    print(f"  hop 1: {len(hop1_refs)}")
-    print(f"  hop 1 (≥{HOP1_MIN_CONNECTIONS} connections to hop-0): {len(hop1_connected_refs)}")
-    print(f"  hop 1 (≥3 connections, for abstract terms): {len(hop1_three_plus_refs)}")
-    print(f"  hop 1 MeSH set (≥{HOP1_MIN_CONNECTIONS} conn only, for augmentation): {len(hop1_mesh_set)} unique terms")
+    print(f"  hop 2 (top 30): {len(hop2_refs)}")
+    if hop2_refs:
+        for i, r in enumerate(hop2_refs[:10], 1):
+            title = (r.get("title") or "")[:60]
+            print(f"    {i}. {title}…" if len((r.get("title") or "")) > 60 else f"    {i}. {title}")
+        if len(hop2_refs) > 10:
+            print(f"    … and {len(hop2_refs) - 10} more")
+    print(f"  hop 3 (top 10): {len(hop3_refs)}")
+    if hop3_refs:
+        for i, r in enumerate(hop3_refs, 1):
+            title = (r.get("title") or "")[:60]
+            print(f"    {i}. {title}…" if len((r.get("title") or "")) > 60 else f"    {i}. {title}")
+    print(f"  MeSH set (hop-2 + hop-3, for augmentation): {len(hop2_hop3_mesh_set)} unique terms")
 
     # Keep only refs that have abstract or MeSH (title-only refs carry minimal signal)
     total_refs = len(all_refs)
@@ -225,14 +232,14 @@ def run(
     print("Classified seed MeSH — intervention:", classified["intervention"])
     print("Classified seed MeSH — others (discarded):", classified["others"])
 
-    # Augment intervention only with hop1 MeSH; keep population MeSH as seed (no hop-1)
-    hop1_mesh_list = sorted(hop1_mesh_set)
-    print(f"\nAugmenting intervention with relevant terms from hop1 ({len(hop1_mesh_list)} terms); population MeSH unchanged …")
+    # Augment intervention with MeSH from hop-2 (top 30) + hop-3 (top 10); keep population MeSH as seed
+    hop2_hop3_mesh_list = sorted(hop2_hop3_mesh_set)
+    print(f"\nAugmenting intervention with relevant terms from hop-2 + hop-3 ({len(hop2_hop3_mesh_list)} terms); population MeSH unchanged …")
     augmented = augment_seed_mesh_with_hop1(
         pico,
         classified["population"],
         classified["intervention"],
-        hop1_mesh_list,
+        hop2_hop3_mesh_list,
     )
     augmented["population"] = list(classified["population"])
     print("Population MeSH (seed only):", augmented["population"])
@@ -253,20 +260,34 @@ def run(
                     print(f"  Abstract extraction failed: {e}")
         print(f"Abstract-derived terms (hop-0): {len(abstract_terms_set)} unique terms")
 
-    # ── 7c2) Free terms from hop-1 (≥3 connections) abstracts: concurrent ─
-    hop1_three_abstracts = [(r.get("abstract") or "").strip() for r in hop1_three_plus_refs]
-    hop1_three_with_abstract = [a for a in hop1_three_abstracts if a]
-    if hop1_three_with_abstract:
-        print(f"\nExtracting terms from {len(hop1_three_with_abstract)} hop-1 (≥3 conn) abstracts (concurrent) …")
-        n_workers = min(len(hop1_three_with_abstract), 10)
+    # ── 7c1) Key phrases from hop-0 seed paper titles (MANDATORY in final query; protected from cleaning) ─
+    hop0_titles = [(r.get("title") or "").strip() for r in hop0_refs if (r.get("title") or "").strip()]
+    seed_title_population: set[str] = set()
+    seed_title_intervention: set[str] = set()
+    if hop0_titles:
+        print(f"\nExtracting terms from {len(hop0_titles)} hop-0 seed paper titles (one Gemini call) …")
+        title_terms = extract_terms_from_seed_titles(hop0_titles, pico)
+        seed_title_population = set(title_terms.get("population") or [])
+        seed_title_intervention = set(title_terms.get("intervention") or [])
+        abstract_terms_set.update(seed_title_population)
+        abstract_terms_set.update(seed_title_intervention)
+        print(f"Seed title terms — population: {len(seed_title_population)}, intervention: {len(seed_title_intervention)} (mandatory in final query)")
+
+    # ── 7c2) Free terms from hop-2 (top 30) + hop-3 (top 10) abstracts: concurrent ─
+    hop2_hop3_refs = hop2_refs + hop3_refs
+    hop2_hop3_abstracts = [(r.get("abstract") or "").strip() for r in hop2_hop3_refs]
+    hop2_hop3_with_abstract = [a for a in hop2_hop3_abstracts if a]
+    if hop2_hop3_with_abstract:
+        print(f"\nExtracting terms from {len(hop2_hop3_with_abstract)} hop-2 + hop-3 abstracts (concurrent) …")
+        n_workers = min(len(hop2_hop3_with_abstract), 10)
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            futures = [executor.submit(extract_terms_from_abstract, ab, pico) for ab in hop1_three_with_abstract]
+            futures = [executor.submit(extract_terms_from_abstract, ab, pico) for ab in hop2_hop3_with_abstract]
             for fut in as_completed(futures):
                 try:
                     abstract_terms_set.update(fut.result())
                 except Exception as e:
                     print(f"  Abstract extraction failed: {e}")
-        print(f"Abstract-derived terms (hop-0 + hop-1 ≥3): {len(abstract_terms_set)} unique terms")
+        print(f"Abstract-derived terms (hop-0 + hop-2 + hop-3): {len(abstract_terms_set)} unique terms")
     if prospero_data:
         # PROSPERO freetext into initial freetext set (before split)
         abstract_terms_set.update(prospero_data["population_terms"])
@@ -322,19 +343,29 @@ def run(
         print("Adding wildcards to intervention freetext (Gemini) …")
         intervention_freetext_for_cleaning = add_wildcards(intervention_freetext_for_cleaning, pico)
 
-    # ── 7g) Gemini cleaning: remove noise, keep only confident PICO-relevant terms ─
-    print("\nCleaning term lists for PubMed (Gemini) …")
+    # Seed title terms are protected: get their wildcarded form and exclude from cleaning
+    seed_title_population_wc: set[str] = set()
+    seed_title_intervention_wc: set[str] = set()
+    if seed_title_population:
+        seed_title_population_wc = set(add_wildcards(sorted(seed_title_population), pico))
+    if seed_title_intervention:
+        seed_title_intervention_wc = set(add_wildcards(sorted(seed_title_intervention), pico))
+
+    # ── 7g) Gemini cleaning: intervention only; seed_title terms are skipped and merged back after ─
+    print("\nCleaning term lists for PubMed (Gemini); seed title terms are protected …")
+    population_freetext_to_clean = [t for t in population_freetext_for_cleaning if t not in seed_title_population_wc]
+    intervention_freetext_to_clean = [t for t in intervention_freetext_for_cleaning if t not in seed_title_intervention_wc]
     cleaned = clean_search_terms_for_pubmed(
         pico,
         sorted(final_population_mesh),
-        population_freetext_for_cleaning,
+        population_freetext_to_clean,
         sorted(final_intervention_mesh),
-        intervention_freetext_for_cleaning,
+        intervention_freetext_to_clean,
     )
     final_population_mesh = set(cleaned["population_mesh"])
-    final_population_freetext = set(cleaned["population_freetext"])
+    final_population_freetext = set(cleaned["population_freetext"]) | seed_title_population_wc
     final_intervention_mesh = set(cleaned["intervention_mesh"])
-    final_intervention_freetext = set(cleaned["intervention_freetext"])
+    final_intervention_freetext = set(cleaned["intervention_freetext"]) | seed_title_intervention_wc
     print("Cleaned population (MeSH):", sorted(final_population_mesh))
     print("Cleaned population (freetext):", sorted(final_population_freetext))
     print("Cleaned intervention (MeSH):", sorted(final_intervention_mesh))

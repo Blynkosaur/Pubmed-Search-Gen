@@ -142,7 +142,9 @@ def parse_prospero(pdf_path: Union[str, Path]) -> Dict[str, Any]:
         "- Exclude form labels such as Q1, Q2, Q3.\n"
         "- Exclude full sentences.\n"
         "- Exclude punctuation and colons; strip them from extracted terms.\n\n"
-        "What to extract:\n"
+        "Inclusion vs exclusion:\n"
+        "- If the protocol mentions EXCLUDING a population, condition, or study type (e.g. 'we will exclude studies of pediatric cancer', 'excluding patients with X'), do NOT extract those as search terms. Only extract terms from inclusion criteria. Exclusion criteria define what the SR does NOT want — adding them to the search would broaden it incorrectly.\n\n"
+        "What to extract (from inclusion criteria only):\n"
         "- Only extract disease names, condition synonyms, drug names, treatment names, and therapy types.\n"
         "- Do NOT extract eligibility criteria (e.g. histologically confirmed, cytologically confirmed, patients 18 or above) UNLESS the SR specifically targets a demographic group (e.g. infants, pediatric, elderly).\n"
         "- Do NOT extract staging terms (e.g. Stage I, Stage II, Stage III).\n"
@@ -150,7 +152,8 @@ def parse_prospero(pdf_path: Union[str, Path]) -> Dict[str, Any]:
         "- Do NOT extract generic modifiers (e.g. in combination, monotherapy, resectable).\n"
         "- Do NOT extract outcome terms (e.g. overall survival, adverse events, pathological response).\n"
         "- Do NOT extract \"Humans\" as a MeSH term.\n"
-        "- Preserve hyphens exactly as written (e.g. anti-PD-1, PD-L1, CTLA-4).\n\n"
+        "- Preserve hyphens exactly as written (e.g. anti-PD-1, PD-L1, CTLA-4).\n"
+        "- If a broad term has a more specific version that is relevant to this SR, extract only the specific version. For example: if the SR is about colorectal surgery, extract \"colorectal surgery\" not \"surgery\". If the SR is about preoperative fasting, extract \"preoperative fasting\" not \"fasting\". Always prefer the most specific form that appears in the document.\n\n"
         "Return JSON only. Only extract what is explicitly written. Do not infer or generate new terms.\n"
         "{\n"
         '  "search_terms": [],\n'
@@ -293,34 +296,40 @@ def clean_search_terms_for_pubmed(
     intervention_freetext: List[str],
 ) -> Dict[str, List[str]]:
     """
-    Single Gemini call: sanity-check the four term lists for a PubMed query.
-    Remove only obvious noise (e.g. form labels, generic terms); keep terms that are at all relevant.
-    Only returns terms from the original lists; does not add new terms.
+    Single Gemini call: clean intervention term lists only; population lists are returned unchanged.
+    Only returns terms from the original intervention lists; does not add new terms.
     """
     api_key = _load_api_key()
     client = genai.Client(api_key=api_key)
 
     prompt = f"""
-You are a systematic review librarian doing a sanity check on search terms for a PubMed query.
+You are a systematic review librarian finalizing intervention search terms for a PubMed boolean query.
+
+Only curate the INTERVENTION lists below. Do not remove or change any population terms — you will return the population lists exactly as provided.
+
+Intervention terms will be OR'd together. Every term independently matches papers. A single overly broad term can return thousands of irrelevant results.
 
 PICO:
 Population: {pico.get('population', '')}
 Intervention: {pico.get('intervention', '')}
+Comparator: {pico.get('comparator', '')}
 Outcome: {pico.get('outcome', '')}
 
-Remove only obvious noise:
-- Incomplete phrases or partial sentences
-- Pure methodology or statistical terms
-- Form labels or question numbers (e.g. Q1, Q2)
-- Any term under 3 characters
+For INTERVENTION only, remove terms that are clearly off-topic or so broad they would match thousands of unrelated papers on their own (e.g. "water", "placebo", "adult", "insulin"). Specifically:
+- Remove population/disease terms that belong in the population block (e.g. disease names) from the intervention list
+- Remove outcome or measurement terms (e.g. insulin resistance, blood glucose, survival)
+- Remove terms so generic they match huge swaths of unrelated literature (e.g. "surg*", "fast*", "treatment*", "patient*")
+- Remove MeSH terms that are parent categories far broader than the SR's actual topic
+- Remove a broad single-word term only when a more specific multi-word version already exists in the list (e.g. remove "Fasting" only if "preoperative fasting" exists)
 
-Keep terms that are at all relevant to the PICO (population, intervention, or outcome).
-Do not aggressively cut; this is a sanity check. When in doubt, keep the term.
+Keep terms that are specific synonyms or alternate phrasings of the intervention, even if they seem redundant with other terms already in the list.
+Keep terms that describe the specific clinical context of this SR (e.g. ERAS, enhanced recovery pathways) as these help catch relevant papers that frame the intervention differently.
+Do not remove terms solely because they duplicate a concept; prefer keeping coverage over trimming for brevity.
 
-Population MeSH: {population_mesh}
-Population freetext: {population_freetext}
-Intervention MeSH: {intervention_mesh}
-Intervention freetext: {intervention_freetext}
+Population MeSH (return unchanged): {population_mesh}
+Population freetext (return unchanged): {population_freetext}
+Intervention MeSH (curate only these): {intervention_mesh}
+Intervention freetext (curate only these): {intervention_freetext}
 
 Return JSON only:
 {{
@@ -329,10 +338,7 @@ Return JSON only:
     "intervention_mesh": [],
     "intervention_freetext": []
 }}
-
-Only return terms from the original lists.
-Do not add new terms.
-Do not explain.
+Return the population_mesh and population_freetext exactly as listed above. Only curate intervention_mesh and intervention_freetext. Only return terms from the original lists; do not add new terms.
 """
     response = client.models.generate_content(
         model=_MODEL_NAME,
@@ -343,14 +349,13 @@ Do not explain.
     if not raw_text.strip():
         raw_text = str(response)
     parsed = json.loads(raw_text.strip())
-    # Restrict to terms that appeared in the original lists
-    orig_pm = set(str(x).strip() for x in population_mesh if x)
-    orig_pf = set(str(x).strip() for x in population_freetext if x)
     orig_im = set(str(x).strip() for x in intervention_mesh if x)
     orig_if = set(str(x).strip() for x in intervention_freetext if x)
+    # Population: return inputs unchanged (no Gemini cleaning)
+    # Intervention: restrict to original lists
     return {
-        "population_mesh": [t for t in (parsed.get("population_mesh") or []) if str(t).strip() in orig_pm],
-        "population_freetext": [t for t in (parsed.get("population_freetext") or []) if str(t).strip() in orig_pf],
+        "population_mesh": list(population_mesh) if population_mesh else [],
+        "population_freetext": list(population_freetext) if population_freetext else [],
         "intervention_mesh": [t for t in (parsed.get("intervention_mesh") or []) if str(t).strip() in orig_im],
         "intervention_freetext": [t for t in (parsed.get("intervention_freetext") or []) if str(t).strip() in orig_if],
     }
@@ -420,14 +425,25 @@ Population freetext terms: {population_freetext}
 Intervention MeSH terms: {intervention_mesh}
 Intervention freetext terms: {intervention_freetext}
 
-Rules:
+The intervention terms above will be OR'd together in a single PubMed search block for the intervention/treatment component of this systematic review. Before building the query, curate the intervention list:
+
+Intervention block rules:
+- Remove any disease or condition terms that belong in the population block, not the intervention block (e.g. disease names, disease acronyms).
+- Remove any term that already appears in the population block. A term should only appear in one block — if it's in population, it should not also be in intervention. This includes both exact duplicates and terms where the freetext version matches a concept already covered by population (e.g. if "NSCLC" is in the population block, remove it from intervention).
+- If a broad single-word term exists alongside a more specific multi-word version containing that word, drop the broad one (e.g. if "neoadjuvant chemotherapy" exists, drop "neoadjuvant" alone; if "immune checkpoint inhibitors" exists, drop "immunotherapy" alone).
+- Keep specific drug names (e.g. carboplatin, nivolumab, nab-paclitaxel).
+- Keep specific combination therapy terms (e.g. chemoimmunotherapy, neoadjuvant chemoimmunotherapy).
+- Keep specific therapy class terms (e.g. immune checkpoint inhibitors).
+- The goal is that every remaining term, on its own, should primarily match papers relevant to this SR's intervention — not papers about unrelated treatments or diseases.
+
+Query structure rules:
 - Exactly 2 blocks: population AND intervention
 - Within each block connect all terms with OR
 - Between blocks use AND
 - MeSH terms use [MeSH Terms] tag
 - Freetext terms use [Title/Abstract] tag
 - Wildcards are already in freetext terms do not modify them
-- Do not add any new terms not in the lists above
+- Do not add any new terms not in the lists above (after curating intervention as above)
 - Do not add NOT operators
 - Do not add study design filters
 - Return the query string only no explanation no markdown
@@ -565,7 +581,7 @@ Classify each MeSH term into one of: population, intervention, others.
 Rules:
 - "population" = the specific disease or condition being studied and its direct synonyms/subtypes.
 - "Humans" is never a defining characteristic of any SR population — always classify as others.
-- Demographic terms (Male, Female, Aged, Middle Aged, Adult, Young Adult, Adolescent, Child, Infant, Aged 80 and over) should ONLY be classified as population if the SR specifically targets that demographic as a defining feature of the population. For example, if the population is "elderly patients with dementia" then "Aged" is population. If the population is "patients with NSCLC" then "Aged" is others — age is not what defines this population.
+- NEVER classify demographic terms as population or intervention. Demographic terms include: Humans, Male, Female, Adult, Young Adult, Middle Aged, Aged, Aged 80 and over, Adolescent, Child, Infant, Child Preschool, Infant Newborn. These are ALWAYS others — UNLESS the PICO population explicitly names that demographic as the subject of the review (e.g. "neonatal sepsis", "pediatric asthma", "geriatric depression"). Standard eligibility criteria like "patients over 18" or "adult patients" do NOT qualify.
 - Study methodology terms (Prospective Studies, Retrospective Studies, Randomized Controlled Trials, Follow-Up Studies, Treatment Outcome, Prognosis, Survival Rate) are always others.
 - Generic parent terms (Neoplasms, Humans, Carcinoma) that are much broader than the SR's specific disease are others.
 - Staging/grading terms (Neoplasm Staging, Neoplasm Grading) are others unless staging is the intervention or primary focus of the SR.
@@ -606,10 +622,10 @@ def augment_seed_mesh_with_hop1(
     hop1_mesh_list: List[str],
 ) -> Dict[str, List[str]]:
     """
-    Add relevant terms from the hop1 MeSH set onto the two classified seed sets.
-    Takes PICO, classified seed population/intervention MeSH, and hop1 MeSH list.
+    Add relevant terms from the related-papers MeSH set (e.g. hop-2 top 30) onto the two classified seed sets.
+    Takes PICO, classified seed population/intervention MeSH, and related MeSH list.
     Returns {"population": [...], "intervention": [...]} with seed terms plus
-    relevant hop1 terms added to the appropriate list.
+    relevant terms added to the appropriate list.
     """
     if not hop1_mesh_list:
         return {"population": list(seed_population), "intervention": list(seed_intervention)}
@@ -622,25 +638,27 @@ def augment_seed_mesh_with_hop1(
     seed_int_block = ", ".join(seed_intervention) if seed_intervention else "(none)"
     hop1_block = "\n".join(f"- {t}" for t in sorted(hop1_mesh_list)[:500])
     prompt = (
-        "You are a systematic review librarian. We have:\n\n"
-        "1. PICO (the review's question)\n"
-        "2. Classified seed MeSH — population and intervention (from confirmed relevant papers)\n"
-        "3. A large set of MeSH terms from related papers (hop-1).\n\n"
-        "Add relevant terms from the hop-1 set onto the seed population and seed intervention lists. "
-        "Only add terms that clearly belong to population/disease/patient group or to intervention/symptoms/diagnosis. "
-        "Do not add demographic noise (Male, Female, Humans, Adult, etc.), study design, or methods. "
-        "Use the exact MeSH string from the hop-1 list.\n\n"
+        "You are a systematic review librarian augmenting search terms for a PubMed boolean query.\n\n"
+        "These terms will be OR'd in a search block. Every term you add will independently match papers. "
+        "Only add terms that are SPECIFIC enough that a paper matching that term alone is likely relevant to this SR.\n\n"
         "PICO:\n"
         f"{pico_block}\n\n"
-        "Seed population MeSH (keep all and add relevant from hop-1):\n"
+        "Seed population MeSH (keep all):\n"
         f"{seed_pop_block}\n\n"
-        "Seed intervention MeSH (keep all and add relevant from hop-1):\n"
+        "Seed intervention MeSH (keep all):\n"
         f"{seed_int_block}\n\n"
-        "Hop-1 MeSH set (choose relevant terms to add to population or intervention):\n"
+        "Related papers MeSH set (refs of papers that cite seeds; choose relevant terms to add):\n"
         f"{hop1_block}\n\n"
+        "Rules:\n"
+        "- Only add a term if a paper tagged with JUST that MeSH term would likely be about this SR's topic.\n"
+        "- Do NOT add broad clinical setting terms (Preoperative Care, Perioperative Care, Postoperative Care, Administration Oral, Infusions Intravenous).\n"
+        "- Do NOT add broad substance terms (Glucose, Water, Sodium Chloride) unless they ARE the specific intervention.\n"
+        "- Do NOT add broad action terms (Eating, Drinking, Fasting, Exercise) unless they ARE the specific intervention or comparator.\n"
+        "- Do NOT add demographic terms (Humans, Male, Female, Adult, Aged, etc.).\n"
+        "- Do NOT add study design or methodology terms.\n"
+        "- When in doubt, do not add. Fewer specific terms is better than many broad terms.\n\n"
         "Return JSON only with two keys: population, intervention.\n"
-        "Each value is an array of MeSH strings: first the original seed terms in order, then any added terms from hop-1.\n"
-        'Example: {"population": ["Colorectal Neoplasms", "Young Adult", "Adenocarcinoma"], "intervention": ["Rectal Bleeding", "Delayed Diagnosis", "Time-to-Treatment"]}'
+        "Each value is an array of MeSH strings: first the original seed terms in order, then any added terms from the related-papers list."
     )
     response = client.models.generate_content(
         model=_MODEL_NAME,
@@ -709,9 +727,11 @@ def extract_terms_from_abstract(abstract: str, pico: Dict[str, Any]) -> List[str
         "Use the PICO only as context for relevance.\n\n"
         "Rules:\n"
         "- Only extract disease names, condition synonyms, drug names, treatment names, and therapy types.\n"
-        "- Do NOT extract outcome measures (e.g. overall survival, pathological response, adverse events, mortality).\n"
+        "- Do NOT extract generic terms (e.g. surgery, treatment, patients).\n"
+        "- Do NOT extract outcome measures (e.g. overall survival, pathological response, adverse events, mortality, insulin resistance, blood glucose, length of stay).\n"
         "- Do NOT extract study design terms (e.g. RCT, clinical trials, meta-analysis, cohort).\n"
         "- Do NOT extract generic modifiers (e.g. in combination, monotherapy, resectable).\n"
+        "- If a broad term has a more specific version that is relevant to this SR, extract only the specific version. For example: if the SR is about colorectal surgery, extract \"colorectal surgery\" not \"surgery\". If the SR is about preoperative fasting, extract \"preoperative fasting\" not \"fasting\". Always prefer the most specific form that appears in the text.\n"
         "- Do NOT extract side effects or safety terms (e.g. rash, irAEs, immunotherapy-related rash).\n"
         "- Do NOT extract eligibility criteria or patient descriptors (e.g. patients 18 or above, histologically confirmed, cytologically confirmed) UNLESS the SR population specifically targets a demographic group (e.g. 'infants', 'pediatric', 'elderly'). If the PICO population defines itself by age or demographic, include that term.\n"
         "- Do NOT extract staging terms (e.g. Stage I, Stage II, Stage III, stage IIIA-N2).\n"
@@ -743,6 +763,61 @@ def extract_terms_from_abstract(abstract: str, pico: Dict[str, Any]) -> List[str
     return [str(t).strip() for t in terms if t and str(t).strip()]
 
 
+def extract_terms_from_seed_titles(
+    titles: List[str],
+    pico: Dict[str, Any],
+) -> Dict[str, List[str]]:
+    """
+    Single Gemini call: extract population and intervention search terms from hop-0 seed paper titles.
+    Returns {"population": [...], "intervention": [...]}. These terms are MANDATORY in the final query.
+    """
+    if not titles:
+        return {"population": [], "intervention": []}
+    api_key = _load_api_key()
+    client = genai.Client(api_key=api_key)
+    pico_block = "\n".join(
+        f"  {k}: {v}" for k, v in pico.items() if isinstance(v, str) and v.strip()
+    )
+    titles_block = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
+    prompt = f"""You are a systematic review librarian. Extract population and intervention search terms from these titles of included studies.
+
+PICO:
+{pico_block}
+
+Titles:
+{titles_block}
+
+Rules:
+- Extract 2-4 word noun phrases that describe the population (disease, procedure, surgery type, patient group) or intervention (treatment, drug, therapy)
+- Extract exact phrases as they appear in the titles
+- Do NOT extract outcome terms (e.g. hospital stay, recovery, insulin resistance)
+- Do NOT extract study design terms (e.g. randomized, controlled, trial, meta-analysis)
+- Do NOT extract generic words (e.g. effects, impact, role, patients)
+- Preserve hyphens and special characters exactly as written
+
+CRITICAL: Terms extracted from hop-0 seed titles are MANDATORY. They must appear in the final PubMed query no matter what. No downstream step — cleaning, deduplication, or filtering — is allowed to remove them. These terms come from confirmed included studies and represent how the SR's topic is actually described in the literature.
+
+Return JSON: {{"population": [...], "intervention": [...]}}"""
+    response = client.models.generate_content(
+        model=_MODEL_NAME,
+        contents=prompt,
+        config={"response_mime_type": "application/json"},
+    )
+    raw_text = getattr(response, "text", None) or ""
+    if not raw_text:
+        raw_text = str(response)
+    raw_text = raw_text.strip()
+    if not raw_text:
+        return {"population": [], "intervention": []}
+    parsed = json.loads(raw_text)
+    pop = parsed.get("population")
+    interv = parsed.get("intervention")
+    return {
+        "population": [str(t).strip() for t in (pop if isinstance(pop, list) else []) if t and str(t).strip()],
+        "intervention": [str(t).strip() for t in (interv if isinstance(interv, list) else []) if t and str(t).strip()],
+    }
+
+
 def extract_freetext_terms_from_titles(
     titles: List[str],
     pico: Dict[str, Any],
@@ -764,11 +839,15 @@ def extract_freetext_terms_from_titles(
         "You are a systematic review librarian building a PubMed search.\n\n"
         "PICO (for context):\n"
         f"{pico_block}\n\n"
-        "Below are paper titles from seed papers (hop-0) and from related papers (hop-1 with at least 2 citation links to seeds). "
+        "Below are paper titles from seed papers (hop-0) and from related papers (hop-1, co-cited with seeds). "
         "Extract useful freetext search terms from these titles that would help find similar studies. "
-        "Include: disease names, symptom phrases, population descriptors, outcome terms, and key concepts. "
+        "Include: disease names, symptom phrases, population descriptors, and key concepts. "
         "Use short phrases (2–4 words) or single terms. No MeSH—only free text. "
         "Deduplicate and return a single list of terms.\n\n"
+        "Rules:\n"
+        "- Do NOT extract generic terms (e.g. surgery, treatment, patients).\n"
+        "- Do NOT extract outcome measures (e.g. insulin resistance, blood glucose, length of stay).\n"
+        "- If a broad term has a more specific version that is relevant to this SR, extract only the specific version. For example: if the SR is about colorectal surgery, extract \"colorectal surgery\" not \"surgery\". If the SR is about preoperative fasting, extract \"preoperative fasting\" not \"fasting\". Always prefer the most specific form that appears in the text.\n\n"
         "Titles:\n"
         f"{titles_block}\n\n"
         "Return JSON only: a single object with one key \"terms\" whose value is an array of strings.\n"
@@ -816,6 +895,10 @@ def split_freetext_terms_by_pico(
         "2. intervention — terms that describe symptoms, signs, diagnostic process, time to diagnosis, delays, or exposure.\n\n"
         "Put each term in exactly one list. Use the exact string from the list. "
         "If a term does not clearly fit either, omit it.\n\n"
+        "Rules:\n"
+        "- Do NOT put generic terms (e.g. surgery, treatment, patients) in either list — omit them.\n"
+        "- Do NOT put outcome measures (e.g. insulin resistance, blood glucose, length of stay) in either list — omit them.\n"
+        "- If a broad term has a more specific version that is relevant to this SR, put only the specific version in the appropriate list. For example: if the SR is about colorectal surgery, use \"colorectal surgery\" not \"surgery\". If the SR is about preoperative fasting, use \"preoperative fasting\" not \"fasting\". Always prefer the most specific form.\n\n"
         "PICO (context):\n"
         f"{pico_block}\n\n"
         "Freetext terms:\n"
