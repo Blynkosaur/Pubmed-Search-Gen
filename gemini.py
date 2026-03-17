@@ -411,55 +411,36 @@ def build_pubmed_query(
     api_key = _load_api_key()
     client = genai.Client(api_key=api_key)
     prompt = f"""
-You are a systematic review librarian building a PubMed boolean query.
+Format the following terms into a PubMed boolean query.
 
-PICO:
-Population: {pico.get('population', '')}
-Intervention: {pico.get('intervention', '')}
-Outcome: {pico.get('outcome', '')}
-
-Build a valid PubMed boolean query using exactly these terms.
-
-Population MeSH terms: {population_mesh}
-Population freetext terms: {population_freetext}
-Intervention MeSH terms: {intervention_mesh}
-Intervention freetext terms: {intervention_freetext}
-
-The intervention terms above will be OR'd together in a single PubMed search block for the intervention/treatment component of this systematic review. Before building the query, curate the intervention list:
-
-Intervention block rules:
-- Remove any disease or condition terms that belong in the population block, not the intervention block (e.g. disease names, disease acronyms).
-- Remove any term that already appears in the population block. A term should only appear in one block — if it's in population, it should not also be in intervention. This includes both exact duplicates and terms where the freetext version matches a concept already covered by population (e.g. if "NSCLC" is in the population block, remove it from intervention).
-- If a broad single-word term exists alongside a more specific multi-word version containing that word, drop the broad one (e.g. if "neoadjuvant chemotherapy" exists, drop "neoadjuvant" alone; if "immune checkpoint inhibitors" exists, drop "immunotherapy" alone).
-- Keep specific drug names (e.g. carboplatin, nivolumab, nab-paclitaxel).
-- Keep specific combination therapy terms (e.g. chemoimmunotherapy, neoadjuvant chemoimmunotherapy).
-- Keep specific therapy class terms (e.g. immune checkpoint inhibitors).
-- The goal is that every remaining term, on its own, should primarily match papers relevant to this SR's intervention — not papers about unrelated treatments or diseases.
-
-Query structure rules:
+Rules:
+- Include EVERY term provided. Do not skip, remove, or filter any terms.
 - Exactly 2 blocks: population AND intervention
 - Within each block connect all terms with OR
 - Between blocks use AND
 - MeSH terms use [MeSH Terms] tag
 - Freetext terms use [Title/Abstract] tag
-- Wildcards are already in freetext terms do not modify them
-- Do not add any new terms not in the lists above (after curating intervention as above)
+- Wildcards are already in freetext terms, do not modify them
+- Do not add any new terms
 - Do not add NOT operators
 - Do not add study design filters
-- Return the query string only no explanation no markdown
+- Your ONLY job is formatting, not curation
+- Return the query string only, no explanation, no markdown
+
+Population MeSH: {population_mesh}
+Population freetext: {population_freetext}
+Intervention MeSH: {intervention_mesh}
+Intervention freetext: {intervention_freetext}
 
 Format:
 (
   "term1"[MeSH Terms]
-  OR "term2"[MeSH Terms]
-  OR "term3"[Title/Abstract]
-  OR "term4*"[Title/Abstract]
+  OR "term2"[Title/Abstract]
 )
 AND
 (
-  "term5"[MeSH Terms]
-  OR "term6"[Title/Abstract]
-  OR "term7*"[Title/Abstract]
+  "term3"[MeSH Terms]
+  OR "term4"[Title/Abstract]
 )
 """
     response = client.models.generate_content(
