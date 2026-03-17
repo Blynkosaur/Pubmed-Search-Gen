@@ -439,17 +439,20 @@ def esearch_query_all_edirect(query: str) -> tuple[Optional[List[str]], Optional
             str(Path(home) / "edirect" / "edirect"),
         ]
         env["PATH"] = os.pathsep.join(extra_paths + [env.get("PATH", "")])
+        # Run in binary mode and decode manually to avoid UnicodeDecodeError
         result = subprocess.run(
             ["bash", "-c", cmd],
             capture_output=True,
-            text=True,
+            text=False,
             timeout=600,
             env=env,
         )
+        stdout_text = (result.stdout or b"").decode("utf-8", errors="replace")
+        stderr_text = (result.stderr or b"").decode("utf-8", errors="replace")
         if result.returncode != 0:
-            err = (result.stderr or result.stdout or "unknown").strip() or f"exit code {result.returncode}"
+            err = (stderr_text or stdout_text or "unknown").strip() or f"exit code {result.returncode}"
             return (None, err)
-        pmids = [line.strip() for line in result.stdout.splitlines() if line.strip() and line.strip().isdigit()]
+        pmids = [line.strip() for line in stdout_text.splitlines() if line.strip() and line.strip().isdigit()]
         return (pmids, None)
     except FileNotFoundError:
         return (None, "esearch/efetch not found (install EDirect and add to PATH)")
