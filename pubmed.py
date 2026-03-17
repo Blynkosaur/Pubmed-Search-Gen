@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 import tempfile
@@ -430,11 +431,20 @@ def esearch_query_all_edirect(query: str) -> tuple[Optional[List[str]], Optional
         query_path = f.name
     try:
         cmd = f'esearch -db pubmed -query "$(cat {shlex.quote(query_path)})" | efetch -format uid'
+        # Ensure PATH includes ~/edirect and ~/edirect/edirect so esearch/efetch can be found
+        env = os.environ.copy()
+        home = os.path.expanduser("~")
+        extra_paths = [
+            str(Path(home) / "edirect"),
+            str(Path(home) / "edirect" / "edirect"),
+        ]
+        env["PATH"] = os.pathsep.join(extra_paths + [env.get("PATH", "")])
         result = subprocess.run(
             ["bash", "-c", cmd],
             capture_output=True,
             text=True,
             timeout=600,
+            env=env,
         )
         if result.returncode != 0:
             err = (result.stderr or result.stdout or "unknown").strip() or f"exit code {result.returncode}"

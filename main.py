@@ -5,8 +5,6 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import pymupdf
-
 from gemini import (
     pico_extractor,
     parse_prospero,
@@ -23,22 +21,6 @@ from gemini import (
 from pubmed import parse as parse_pdf_references
 from openalex import find_doi_by_title, load_or_build_citation_graph
 from src.recall_nbib_included_studies import get_n_random_studies
-
-_DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s\"'>]+\b", re.IGNORECASE)
-
-
-def _extract_sr_doi(pdf_path: Path) -> str | None:
-    """Try to find the SR's own DOI from the first two pages of the PDF."""
-    doc = pymupdf.open(pdf_path)
-    try:
-        text = ""
-        for i in range(min(2, len(doc))):
-            text += doc.load_page(i).get_text("text") or ""
-    finally:
-        doc.close()
-    m = _DOI_RE.search(text)
-    return m.group(0).strip().rstrip(".") if m else None
-
 
 def run(
     pdf_path: Path,
@@ -113,15 +95,8 @@ def run(
             print("No DOIs or titles found; cannot build citation graph.")
             return
 
-    # 3) Extract the SR's own DOI so we can also seed papers that cite it
-    sr_doi = _extract_sr_doi(pdf_path)
-    if sr_doi:
-        print(f"SR DOI detected: {sr_doi}")
-    else:
-        print("Could not detect SR DOI from PDF — skipping cited-by-SR seeds")
-
-    # 4) Build / load citation graph via OpenAlex
-    graph = load_or_build_citation_graph(seed_refs, pdf_path=pdf_path, sr_doi=sr_doi)
+    # 3) Build / load citation graph via OpenAlex
+    graph = load_or_build_citation_graph(seed_refs, pdf_path=pdf_path)
 
     hop0_count = sum(1 for n in graph.values() if n["hop"] == 0)
     hop1_count = sum(1 for n in graph.values() if n["hop"] == 1)

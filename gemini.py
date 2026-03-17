@@ -220,9 +220,11 @@ def parse_prospero(pdf_path: Union[str, Path]) -> Dict[str, Any]:
 
     return {
         "search_terms": clean_terms(parsed.get("search_terms")),
-        "population_terms": clean_terms(parsed.get("population_terms")),
+        # Population terms are intentionally ignored for downstream use; only intervention is used.
+        "population_terms": [],
         "intervention_terms": clean_terms(parsed.get("intervention_terms")),
-        "mesh_terms_population": clean_terms(parsed.get("mesh_terms_population")),
+        # Population MeSH from PROSPERO is also ignored; only intervention MeSH is used.
+        "mesh_terms_population": [],
         "mesh_terms_intervention": clean_terms(parsed.get("mesh_terms_intervention")),
         "full_query": (parsed.get("full_query") or "").strip(),
     }
@@ -933,7 +935,10 @@ def split_freetext_terms_by_pico(
         "Rules:\n"
         "- Do NOT put generic terms (e.g. surgery, treatment, patients) in either list — omit them.\n"
         "- Do NOT put outcome measures (e.g. insulin resistance, blood glucose, length of stay) in either list — omit them.\n"
-        '- If a broad term has a more specific version that is relevant to this SR, put only the specific version in the appropriate list. For example: if the SR is about colorectal surgery, use "colorectal surgery" not "surgery". If the SR is about preoperative fasting, use "preoperative fasting" not "fasting". Always prefer the most specific form.\n\n'
+        '- If a broad term has a more specific version that is relevant to this SR, put only the specific version in the appropriate list. For example: if the SR is about colorectal surgery, use "colorectal surgery" not "surgery". If the SR is about preoperative fasting, use "preoperative fasting" not "fasting". Always prefer the most specific form.\n'
+        "- For each POPULATION term, apply this test: if you searched PubMed for ONLY this term, would most results be specifically about this SR's population? If the term could match papers about a completely different topic without additional context, omit it. For example, \"neglect\" alone matches elder neglect, self-neglect, neglected diseases — omit it. But \"child neglect\" specifically matches this SR's population — keep it.\n"
+        "- For each INTERVENTION term, apply the same test: if you searched PubMed for ONLY this term, would most results be about this SR's intervention? If the term matches thousands of unrelated studies, omit it. For example, \"scale\" matches any measurement scale — omit it. But \"screening tool\" is specific enough — keep it.\n"
+        "- Single generic words (e.g. \"abuse\", \"neglect\", \"injury\", \"trauma\", \"scale\", \"instrument\", \"fasting\", \"water\", \"placebo\") should almost always be omitted unless they are the exact name of the condition or intervention.\n\n"
         "PICO (context):\n"
         f"{pico_block}\n\n"
         "Freetext terms:\n"
