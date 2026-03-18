@@ -1,11 +1,16 @@
 ## Otto Take‑Home: Systematic Review Search Pipeline
 
+For Design Notes,
+Check out the docs folder,
+
 This repo contains a prototype pipeline that reverse‑engineers a systematic review’s PICO and search strategy, builds a PubMed query, and evaluates recall of PubMed search result sets against the review’s own included studies.
+
+Overall, the structure is satisfactory to me , at this point it's just about tweaking prompts to filter better, or deciding how to extract terms
 
 The core flow is:
 
-- **Input**: a systematic review PDF and, optionally, an Included Studies spreadsheet and NBIB search result files.
-- **Processing**: Gemini + PubMed + TF‑IDF are used to extract PICO, derive search terms, and construct a PubMed query.
+- **Input**: a systematic review PDF and, optionally, an Included Studies spreadsheet (for seed studies), an N count, and a PROSPERO registration PDF.
+- **Processing**: Seeds are chosen from the Excel or from PDF references; a citation graph is built via OpenAlex; Gemini extracts PICO, classifies and augments MeSH, extracts freetext terms from abstracts and seed titles, and splits them by PICO; terms are wildcarded, cleaned (with seed and PROSPERO terms protected), and age/race demographic terms are banned; then **code-only** subsumption removal and cross-block dedup run (no LLM), population MeSH is merged into population freetext, and the PubMed query is built.
 - **Output**: a PubMed Boolean query string and recall metrics for NBIB search sets.
 
 ---
@@ -13,27 +18,34 @@ The core flow is:
 ## 1. Repository layout
 
 - `main.py`  
-  End‑to‑end driver for a single systematic review PDF: builds/loads a references cache, extracts PICO, filters references by similarity, asks Gemini for search terms, and builds a PubMed query.
+  End‑to‑end driver: loads or builds seed references, builds the citation graph (OpenAlex), extracts PICO, runs the MeSH and freetext term pipeline, cleans (with protected terms), applies demographic bans, runs **code-only** subsumption removal and cross-block dedup (`remove_subsumed_terms` + intervention terms that appear in population are removed), merges population MeSH into population freetext, and builds the PubMed query.
 
 - `gemini.py`  
   Functions that call Gemini (Google GenAI) to:
-  - Extract the SR’s own PICO (`pico_extractor`).
-  - Reduce PICO to 3 key concepts per facet (`get_pico_keywords`).
-  - Extract search terms from the SR manuscript (`extract_terms_from_sr`).
-  - Extract search terms from included references (`extract_terms`).
-  - Merge and filter extracted terms based on key concepts and heuristic rules (`merge_terms`, `filter_terms_by_key_concepts`, `filter_extracted_terms`).
+  - Extract the SR’s PICO from the PDF (`pico_extractor`).
+  - Parse PROSPERO registration PDF for author search terms (`parse_prospero`).
+  - Classify seed-paper MeSH into population / intervention / others (`classify_seed_mesh_terms`).
+  - Augment seed MeSH with relevant terms from hop-2/hop-3 papers (`augment_seed_mesh_with_hop1`), capped at 10 new terms total.
+  - Extract search terms from abstracts (`extract_terms_from_abstract`) and from seed paper titles (`extract_terms_from_seed_titles`).
+  - Split freetext terms into population vs intervention (`split_freetext_terms_by_pico`).
+  - Add wildcards to freetext terms (`add_wildcards`).
+  - Clean term lists for PubMed (`clean_search_terms_for_pubmed`).
+  - Format the final PubMed query (`build_pubmed_query`).
+  - Extract titles from reference strings when DOI is missing (`extract_titles_from_references`).
+
+  For extraction steps (not cleaning or query formatting), the pipeline runs two concurrent Gemini calls and unions the results to improve recall.
 
 - `pubmed.py`  
-  Helpers for parsing reference lists from PDFs and talking to NCBI E‑utilities:
-  - Parse the PDF’s references into structured `Reference` objects (`parse`).
-  - Fetch metadata (PMID, DOI, title, abstract, MeSH) for DOIs/titles (`fetch_references_metadata`, `fetch_metadata_for_identifiers`).
-  - Turn a PubMed query into an NBIB record set (`search_and_fetch_nbib`).
+  Helpers for parsing reference lists from PDFs and talking to NCBI E‑utilities (parse references, fetch metadata by DOI/title, search and fetch NBIB).
+
+- `openalex.py`  
+  Citation graph: resolve DOIs/titles to OpenAlex works, fetch citing papers (hop 1), and select hop-2/hop-3 reference sets.
 
 - `query_builder.py`  
-  Turns cleaned/filtered PICO term dictionaries into a final PubMed Boolean query string (`build_query`).
+  Utilities to turn PICO term dicts into PubMed Boolean strings (`build_query`, `build_query_two_blocks`); the main pipeline uses `gemini.build_pubmed_query` for the final query.
 
 - `filter.py`  
-  Utilities to parse and TF‑IDF‑filter raw reference lists (mainly useful for inspection / debugging).
+  Utilities to parse and TF‑IDF‑filter raw reference lists (mainly for inspection / debugging).
 
 - `src/recall_nbib_included_studies.py`  
   Standalone script to compute recall of NBIB/RIS search results vs an Included Studies Excel.
@@ -45,265 +57,156 @@ The core flow is:
 
 ## 2. End‑to‑end pipeline from SR PDF to PubMed query
 
-### 2.1. Step 1 – Build or load the references cache
+### 2.1. Step 1 – Seed studies
 
-For a given SR PDF (e.g. `data/151 - Moiz 2025/Moiz 2025.pdf`), the pipeline needs structured metadata (title, abstract, MeSH) for the references that the SR cites.
+Seeds are chosen in one of two ways:
 
-This metadata is cached in a JSON file next to the PDF:
+- **From Included Studies Excel** (when `--xlsx` and `--N` are provided):  
+  `N` random rows are loaded from the Excel. For rows without DOI, OpenAlex is queried by title to try to find a DOI. Only rows with at least a DOI or title are kept.
 
-- Cache path: `<pdf_directory>/<pdf_stem>_references.json`  
-  e.g. `data/151 - Moiz 2025/Moiz 2025_references.json`
+- **From the SR PDF** (default):  
+  References are parsed from the PDF. For each reference, DOI is used when present; otherwise Gemini extracts the title from the raw reference string. Only references with DOI or title are kept.
 
-In `main.py`:
+These seeds are used as **hop 0** in the citation graph.
 
-```12:29:/Users/bryanlin/OttoTakehome/main.py
-def run(pdf_path: Path) -> None:
-    pdf_path = Path(pdf_path)
-    cache_path = _ref_cache_path(pdf_path)
-    if not cache_path.exists():
-        print(f"No references cache at {cache_path}. Building it from {pdf_path.name} (this may take a few minutes)...")
+### 2.2. Step 2 – Citation graph (OpenAlex)
 
-        # 1) Parse references from the PDF
-        refs = parse_pdf_references(pdf_path)
-        ...
-        # 2) Build identifiers: DOI if present, else parsed title
-        identifiers = [...]
-        ...
-        # 3) Fetch PubMed metadata for each identifier
-        metadata = fetch_metadata_for_identifiers(identifiers)
-        ...
-        # 4) Normalize and save as JSON
-        cache_path.write_text(json.dumps(references, ensure_ascii=False, indent=2), encoding="utf-8")
-    else:
-        with cache_path.open("r", encoding="utf-8") as f:
-            references = json.load(f)
-```
+- The pipeline builds or loads a citation graph for the seed DOIs/titles.
+- **Hop 0**: seed papers.
+- **Hop 1**: papers that cite any seed (from OpenAlex).
+- **Hop 2**: top 30 references (by connection count) of hop-1 papers.
+- **Hop 3**: top 10 papers by connections to those top-30 hop-2 refs.
 
-Under the hood:
+The pipeline uses **hop 0 + hop 2 + hop 3** as the reference set for term extraction (only refs with abstract or MeSH are kept). The graph is cached as `citation_graph.json` next to the PDF.
 
-- `pubmed.parse(pdf_path)`:
-  - Reads the PDF.
-  - Locates the References section.
-  - Splits it into individual references.
-  - Extracts a best‑effort DOI, year, and title for each.
+### 2.3. Step 3 – PICO extraction
 
-- `pubmed.fetch_metadata_for_identifiers(identifiers)`:
-  - For each DOI or title, calls PubMed’s ESearch + EFetch.
-  - Returns metadata dicts with at least `pmid`, `doi`, `title`, `abstract`, and `mesh_terms`.
+- `gemini.pico_extractor(pdf_path)` reads the SR PDF and asks Gemini for the review’s Population and Intervention (and comparator/outcome if present).
+- Returns a dict with keys such as `summary`, `population`, `intervention`, `comparator`, `outcome`.
 
-The resulting list of metadata dicts is written to `<pdf_stem>_references.json` and re‑used on subsequent runs.
+### 2.4. Step 4 – Optional PROSPERO
 
-### 2.2. Step 2 – Extract the SR’s PICO with Gemini
+- If `--prospero` points to a PROSPERO registration PDF, `gemini.parse_prospero(prospero_path)` extracts author-provided search terms (population, intervention, MeSH, full query as reference).
+- These terms are added with priority to the final population/intervention blocks and are **protected from cleaning** (excluded from the cleaning input and merged back after).
 
-`gemini.pico_extractor(pdf_path)`:
+### 2.5. Step 5 – MeSH pipeline
 
-- Reads the full text of the SR PDF.
-- Sends a prompt to Gemini asking:
-  - “Given this manuscript, what is the review’s own Population and Intervention?”
-- Expects JSON:
+1. **Seed MeSH**  
+   All MeSH terms from hop-0 seed papers are collected. `classify_seed_mesh_terms(seed_mesh_list, pico)` (Gemini) classifies them into `population`, `intervention`, and `others`. If PROSPERO was parsed, its population and intervention MeSH are appended to the classified lists.
 
-```python
-{"population": "...", "intervention": "..."}
-```
+2. **Augmentation**  
+   `augment_seed_mesh_with_hop1(pico, seed_population, seed_intervention, hop2_hop3_mesh_list)` (Gemini) adds relevant MeSH from hop-2 and hop-3 papers to the **intervention** list only (population MeSH remains seed-only, plus PROSPERO if present). Augmentation from hop-2/hop-3 is capped at **10 new MeSH terms total** across population and intervention; if more than 10 related-paper terms look relevant, only the 10 most specific and central ones are kept.
 
-This gives a concise machine‑readable PICO summary directly from the paper.
+3. **Final MeSH blocks**
+   - Population: seed (+ PROSPERO).
+   - Intervention: augmented seed (+ PROSPERO), with at most 10 additional MeSH terms coming from hop-2/hop-3.
 
-### 2.3. Step 3 – Compute PICO‑similarity scores for references (TF‑IDF)
+### 2.6. Step 6 – Freetext pipeline
 
-In `main.run`:
+1. **Abstracts**  
+   Terms are extracted from hop-0 abstracts and from hop-2 + hop-3 abstracts via `extract_terms_from_abstract` (Gemini, concurrent over abstracts). All are merged into a single freetext pool.
 
-- Build a PICO text string:
+2. **Seed paper titles**  
+   `extract_terms_from_seed_titles(hop0_titles, pico)` (Gemini) extracts population and intervention phrases from seed titles. These are **mandatory** in the final query and **protected from cleaning** (excluded from cleaning input, merged back after). They are also added to the freetext pool.
 
-```12:39:/Users/bryanlin/OttoTakehome/main.py
-pico = pico_extractor(pdf_path)
-pico_text = " ".join(str(pico.get(k, "")) for k in ("population", "intervention"))
-```
+3. **PROSPERO freetext**  
+   If PROSPERO was parsed, its population terms, intervention terms, and search terms are added to the freetext pool.
 
-- Turn each reference into a “document”:
+4. **Split by PICO**  
+   `split_freetext_terms_by_pico(all_freetext_set, pico)` (Gemini) assigns each freetext term to population or intervention (or drops it). Result is two lists: population freetext and intervention freetext.
 
-```12:18:/Users/bryanlin/OttoTakehome/main.py
-def _doc_for_ref(rec: dict) -> str:
-    abstract = (rec.get("abstract") or "").strip()
-    if abstract:
-        return abstract
-    mesh = rec.get("mesh_terms") or []
-    if mesh:
-        return " ".join(str(m) for m in mesh if m)
-    return (rec.get("title") or "").strip()
-```
+5. **Final freetext blocks**  
+   Combined with PROSPERO population/intervention/search terms as above.
 
-- Use TF‑IDF + cosine similarity:
-  - Documents = `[pico_text] + ref_docs`.
-  - `TfidfVectorizer(stop_words="english")`.
-  - Compute cosine similarity between the PICO vector and each reference.
+### 2.7. Step 7 – Wildcards and cleaning
 
-- Keep only PICO‑relevant references:
-  - Threshold is `0.05` by default.
-  - Those references become the context for search‑term extraction.
+1. **Wildcards**  
+   All population and intervention freetext terms are passed through `add_wildcards(..., pico)` (Gemini) to get PubMed-friendly forms (e.g. trailing `*` where appropriate).
 
-### 2.4. Step 4 – Extract search terms (MeSH + freetext) with Gemini
+2. **Protected terms**
+   - **Seed title terms**: Their wildcarded forms are computed; these terms are excluded from the lists sent to cleaning and merged back after.
+   - **PROSPERO terms**: PROSPERO MeSH are excluded from the mesh lists sent to cleaning; PROSPERO freetext (wildcarded) are excluded from the freetext lists sent to cleaning. All are merged back after cleaning.
 
-There are two main extraction passes in `gemini.py`:
+3. **Cleaning**  
+   `clean_search_terms_for_pubmed(...)` (Gemini) cleans and deduplicates the non-protected terms. Then final population/intervention MeSH and freetext are merged with protected sets.
 
-1. **From the SR text itself** – `extract_terms_from_sr(pdf_path)`  
-   - Gemini is asked to read the manuscript and locate where the authors describe their search strategy.
-   - It extracts:
-     - `study_design` (e.g. `randomized_controlled_trial`, `observational`, `systematic_review`, or `any`).
-     - Population terms: `{"mesh": [...], "freetext": [...]}`
-     - Intervention terms: same structure.
+### 2.8. Step 8 – Demographic ban
 
-2. **From the filtered references** – `extract_terms(pico, references)`  
-   - Gemini is given:
-     - The PICO description.
-     - Titles, abstracts, and MeSH terms from the most PICO‑relevant references.
-   - It extracts MeSH and freetext terms for population and intervention, plus a study design label.
+- Only **age- and race-related** descriptors are banned (not medical conditions like pregnancy or disability).
+- A fixed list of age-related MeSH (e.g. Adult, Child, Adolescent, Aged) is removed from both population and intervention MeSH.
+- A fixed list of age- and race-related freetext bases (e.g. adult, children, pediatric, elderly, racial, ethnic, Black, White, Asian, Hispanic) is applied:
+  - **Population freetext**: A term is removed unless it contains a “seed keyword” (from PICO population and seed title population) that indicates disease-specific phrasing; otherwise if it matches a banned base it is dropped.
+  - **Intervention freetext**: Any term that matches a banned age/race base is dropped.
 
-These two outputs are then merged:
+### 2.9. Step 9 – Subsumption removal and cross-block dedup (code only, no LLM)
 
-- `merge_terms(sr_terms, ref_terms)`:
-  - Unions `mesh` and `freetext` lists per facet (SR‑reported + reference‑derived).
-  - De‑duplicates while preserving SR‑first order.
-  - Picks a final `study_design`.
+- **Subsumption removal** (`remove_subsumed_terms` in `main.py`): For population and intervention freetext, any broad wildcard term whose matches are fully covered by at least two more specific terms in the same list is dropped.
+- **Cross-block dedup**: Any term that appears in the population block (MeSH or freetext) is removed from the intervention block, so each term appears in at most one block (population is preferred).
 
-### 2.5. Step 5 – Narrow terms to key PICO concepts
+### 2.10. Step 10 – Pre-query merge and query build
 
-To avoid over‑broad or off‑topic terms, the pipeline runs additional Gemini filters:
+- **Population freetext** is augmented with **all population MeSH** (union, deduplicated), so population MeSH terms also appear in the population freetext set for the query.
 
-1. **Key concepts from PICO** – `get_pico_keywords(pico)`  
-   - Asks Gemini for exactly **3 key concepts** for:
-     - Population (who the patients are).
-     - Intervention (what is being done).
+- `gemini.build_pubmed_query(...)` (Gemini) formats the four term sets into a single PubMed Boolean string: two blocks (population AND intervention), MeSH with `[MeSH Terms]`, freetext with `[Title/Abstract]`. This step is formatting only; it does not add or remove terms.
 
-2. **Filter by key concepts** – `filter_terms_by_key_concepts(terms, key_concepts)`  
-   - Gemini is given:
-     - The merged terms.
-     - The 3 key concepts per facet.
-   - It returns the same shape, but with only terms that clearly relate to those concepts per facet.
-
-3. **Apply rule‑based filtering** – `filter_extracted_terms(terms, references)`  
-   - Another Gemini pass with detailed rules:
-     - Population = “who the patients are” (diagnoses/conditions/procedures that determine eligibility).
-     - Intervention = core mechanism/modality (what makes the intervention distinct).
-     - Prefer specific over broad.
-     - Keep about 6–10 terms per list.
-     - Prefer terms that appear frequently in the provided abstracts.
-   - Returns a compact and focused set of terms for each facet.
-
-At the end of this step, you have a small, high‑signal set of search terms for population and intervention plus a study design label.
-
-### 2.6. Step 6 – Build the PubMed query
-
-`query_builder.build_query(terms)`:
-
-- Input: a dict like:
-
-```python
-{
-  "study_design": "randomized_controlled_trial",
-  "population": {"mesh": [...], "freetext": [...]},
-  "intervention": {"mesh": [...], "freetext": [...]},
-}
-```
-
-- For each facet:
-  - MeSH → `"term"[MeSH Terms]`
-  - Freetext:
-    - Drops single‑word terms.
-    - Keeps only multi‑word phrases.
-    - Wraps as `"term"[Title/Abstract]`.
-
-- Builds facet clauses and combines them:
-  - If both population and intervention present: `(population_clause) AND (intervention_clause)`.
-  - If only one facet has terms, uses that facet alone.
-
-- If `study_design == "randomized_controlled_trial"`:
-  - Adds an RCT filter: `"Randomized Controlled Trial"[pt]`.
-
-The final query string is printed by `main.py` and can be pasted directly into PubMed.
+The final query string is printed by `main.py`.
 
 ---
 
 ## 3. Evaluating search recall with Included Studies + NBIB
 
-The pipeline also supports measuring how well an NBIB search set retrieves a review’s own included studies.
+The pipeline supports measuring how well an NBIB search set retrieves a review’s included studies.
 
 Script: `src/recall_nbib_included_studies.py`
 
 ### 3.1. Inputs
 
 - **Included studies Excel**  
-  e.g. `data/151 - Moiz 2025/Moiz 2025 Included Studies.xlsx`
-  - Columns (detected heuristically): DOI, PubMed ID, Title, Year.
+  e.g. `data/151 - Moiz 2025/Moiz 2025 Included Studies.xlsx`  
+  Columns (detected heuristically): DOI, PubMed ID, Title, Year.
 
 - **NBIB or RIS search results**  
-  e.g. `data/151 - Moiz 2025/pubmed-ObesityMeS-set.nbib`
-  - Produced by running the generated PubMed query (or any other query) and exporting results as MEDLINE/NBIB.
+  e.g. `data/151 - Moiz 2025/pubmed-ObesityMeS-set.nbib`  
+  From running the generated PubMed query (or any query) and exporting as MEDLINE/NBIB.
 
 ### 3.2. Matching logic
 
-For each included study:
-
-1. Normalize:
-   - DOI (strip protocol, lowercase, remove trailing slash).
-   - PubMed ID (digit string).
-   - Title (lowercase, remove punctuation, collapse whitespace).
-
-2. Load bib records from `.nbib` / `.ris`:
-   - Collect normalized DOI, PMID, title, and year per record.
-
-3. Check if the included study is present in the bib:
-   - DOI match OR
-   - PMID match OR
-   - Fuzzy title match (using `difflib.SequenceMatcher`) with optional year check.
+For each included study: normalize DOI, PMID, and title; load bib records from `.nbib`/`.ris`; match by DOI, or PMID, or fuzzy title (and optional year).
 
 ### 3.3. Metrics
 
-The script prints:
-
-- `Included studies (Excel)` = total rows in the included‑studies file that have at least some identifier.
-- `Included studies found in bib` = how many of those are matched in the NBIB/RIS.
-- `Total studies in bib file(s)` = total records in the NBIB/RIS.
-- `Recall %` = `(included found in bib) / (total included) * 100`.
-- `Ratio (included in bib / total in bib)` = a rough measure of precision (how dense the included studies are in the bib set).
-
-With `-l/--list`, it also prints each included study labeled as `FOUND` or `NOT FOUND`, with its DOI and PubMed ID, so you can see which ones are missed.
-
-Example (Moiz 2025 + `pubmed-ObesityMeS-set.nbib`):
-
-```text
-Included studies (Excel):     26
-Included studies found in bib: 23
-Total studies in bib file(s):  667
-Recall %:                     88.46%
-Ratio (included in bib / total in bib): 0.0345
-```
+- Included studies (Excel), included found in bib, total studies in bib, Recall %, and ratio (included in bib / total in bib). With `-l/--list`, each included study is labeled FOUND or NOT FOUND.
 
 ---
 
 ## 4. Typical workflow
 
-For a new SR PDF:
-
-1. **Generate the query**
-   - Run:
+**Generate the query** (seeds from PDF references):
 
 ```bash
 python3 main.py --pdf "data/151 - Moiz 2025/Moiz 2025.pdf"
 ```
 
-   - On first run, this:
-     - Parses references and builds `Moiz 2025_references.json`.
-     - Extracts PICO from the manuscript (Gemini).
-     - TF‑IDF filters references by similarity to the PICO.
-     - Extracts/filters PICO search terms (Gemini).
-     - Prints a PubMed query.
+**Generate the query** (seeds from Included Studies Excel, e.g. 5 random):
 
-2. **Run the query in PubMed and export results to NBIB**
-   - Paste the query into PubMed.
-   - Export results as MEDLINE (NBIB) to e.g. `data/151 - Moiz 2025/pubmed-ObesityMeS-set.nbib`.
+```bash
+python3 main.py --pdf "data/151 - Moiz 2025/Moiz 2025.pdf" \
+  --xlsx "data/151 - Moiz 2025/Moiz 2025 Included Studies.xlsx" --N 5
+```
 
-3. **Evaluate recall vs Included Studies**
-   - Run:
+**With PROSPERO registration** (author terms added and protected from cleaning):
+
+```bash
+python3 main.py --pdf "data/151 - Moiz 2025/Moiz 2025.pdf" \
+  --xlsx "data/151 - Moiz 2025/Moiz 2025 Included Studies.xlsx" --N 5 \
+  --prospero "data/151 - Moiz 2025/Moiz 2025 PROSPERO.pdf"
+```
+
+On first run (without an existing citation graph), the pipeline will use OpenAlex to build the graph. PICO is extracted from the PDF, then the MeSH and freetext pipelines run (with optional PROSPERO), cleaning (seed and PROSPERO protected), demographic ban (age/race only), code-only subsumption removal and cross-block dedup, population-mesh merge into population freetext, and query build. The PubMed query is printed.
+
+**Run the query in PubMed** and export results to NBIB.
+
+**Evaluate recall**:
 
 ```bash
 python3 src/recall_nbib_included_studies.py \
@@ -311,7 +214,18 @@ python3 src/recall_nbib_included_studies.py \
   "data/151 - Moiz 2025/pubmed-ObesityMeS-set.nbib"
 ```
 
-   - Optionally add `-l` to see which included studies are missing from the NBIB set.
+Use `-l` to list which included studies are missing from the NBIB set.
 
-This gives a full loop from **manuscript PDF → PICO → PubMed query → NBIB results → recall metric** for each systematic review.
+This gives a full loop: **manuscript PDF (and optional Excel/PROSPERO) → seeds → citation graph → PICO → MeSH + freetext → cleaning (protected terms) → demographic ban (age/race) → subsumption removal + cross-block dedup (code) → population mesh merged into population freetext → PubMed query → NBIB → recall**.
 
+---
+
+## 5. Dependencies
+
+Install with:
+
+```bash
+pip install -r requirements.txt
+```
+
+Set `GEMINI_API_KEY` in the environment (or in a `.env` file next to the project) for Gemini calls. The OpenAlex API is used without a key (rate-limited by request).
