@@ -10,7 +10,7 @@ Overall, the structure is satisfactory to me , at this point it's just about twe
 The core flow is:
 
 - **Input**: a systematic review PDF and, optionally, an Included Studies spreadsheet (for seed studies), an N count, and a PROSPERO registration PDF.
-- **Processing**: Seeds are chosen from the Excel or from PDF references; a citation graph is built via OpenAlex; Gemini extracts PICO, classifies and augments MeSH, extracts freetext terms from abstracts and seed titles, and splits them by PICO; terms are wildcarded, cleaned (with seed and PROSPERO terms protected), and age/race demographic terms are banned; then **code-only** subsumption removal and cross-block dedup run (no LLM), population MeSH is merged into population freetext, and the PubMed query is built.
+- **Processing**: Seeds are chosen from the Excel or from PDF references; a citation graph is built via OpenAlex; Gemini extracts PICO, classifies and augments MeSH, extracts freetext terms from abstracts and seed titles, and splits them by PICO; terms are wildcarded, cleaned (with seed and PROSPERO terms protected), and age/race demographic terms are banned; population MeSH is merged into population freetext, and the PubMed query is built.
 - **Output**: a PubMed Boolean query string and recall metrics for NBIB search sets.
 
 ---
@@ -18,7 +18,7 @@ The core flow is:
 ## 1. Repository layout
 
 - `main.py`  
-  End‑to‑end driver: loads or builds seed references, builds the citation graph (OpenAlex), extracts PICO, runs the MeSH and freetext term pipeline, cleans (with protected terms), applies demographic bans, runs **code-only** subsumption removal and cross-block dedup (`remove_subsumed_terms` + intervention terms that appear in population are removed), merges population MeSH into population freetext, and builds the PubMed query.
+  End‑to‑end driver: loads or builds seed references, builds the citation graph (OpenAlex), extracts PICO, runs the MeSH and freetext term pipeline, cleans (with protected terms), applies demographic bans, merges population MeSH into population freetext, and builds the PubMed query.
 
 - `gemini.py`  
   Functions that call Gemini (Google GenAI) to:
@@ -138,12 +138,7 @@ The pipeline uses **hop 0 + hop 2 + hop 3** as the reference set for term extrac
   - **Population freetext**: A term is removed unless it contains a “seed keyword” (from PICO population and seed title population) that indicates disease-specific phrasing; otherwise if it matches a banned base it is dropped.
   - **Intervention freetext**: Any term that matches a banned age/race base is dropped.
 
-### 2.9. Step 9 – Subsumption removal and cross-block dedup (code only, no LLM)
-
-- **Subsumption removal** (`remove_subsumed_terms` in `main.py`): For population and intervention freetext, any broad wildcard term whose matches are fully covered by at least two more specific terms in the same list is dropped.
-- **Cross-block dedup**: Any term that appears in the population block (MeSH or freetext) is removed from the intervention block, so each term appears in at most one block (population is preferred).
-
-### 2.10. Step 10 – Pre-query merge and query build
+### 2.9. Step 9 – Pre-query merge and query build
 
 - **Population freetext** is augmented with **all population MeSH** (union, deduplicated), so population MeSH terms also appear in the population freetext set for the query.
 
@@ -202,7 +197,7 @@ python3 main.py --pdf "data/151 - Moiz 2025/Moiz 2025.pdf" \
   --prospero "data/151 - Moiz 2025/Moiz 2025 PROSPERO.pdf"
 ```
 
-On first run (without an existing citation graph), the pipeline will use OpenAlex to build the graph. PICO is extracted from the PDF, then the MeSH and freetext pipelines run (with optional PROSPERO), cleaning (seed and PROSPERO protected), demographic ban (age/race only), code-only subsumption removal and cross-block dedup, population-mesh merge into population freetext, and query build. The PubMed query is printed.
+On first run (without an existing citation graph), the pipeline will use OpenAlex to build the graph. PICO is extracted from the PDF, then the MeSH and freetext pipelines run (with optional PROSPERO), cleaning (seed and PROSPERO protected), demographic ban (age/race only), code-only population-mesh merge into population freetext, and query build. The PubMed query is printed.
 
 **Run the query in PubMed** and export results to NBIB.
 
@@ -216,7 +211,7 @@ python3 src/recall_nbib_included_studies.py \
 
 Use `-l` to list which included studies are missing from the NBIB set.
 
-This gives a full loop: **manuscript PDF (and optional Excel/PROSPERO) → seeds → citation graph → PICO → MeSH + freetext → cleaning (protected terms) → demographic ban (age/race) → subsumption removal + cross-block dedup (code) → population mesh merged into population freetext → PubMed query → NBIB → recall**.
+This gives a full loop: **manuscript PDF (and optional Excel/PROSPERO) → seeds → citation graph → PICO → MeSH + freetext → cleaning (protected terms) → demographic ban (age/race) → population mesh merged into population freetext → PubMed query → NBIB → recall**.
 
 ---
 
