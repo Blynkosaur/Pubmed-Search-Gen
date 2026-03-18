@@ -428,12 +428,43 @@ def build_pubmed_query(
 ) -> str:
     """
     Build a valid PubMed boolean query from the four term sets using Gemini.
-    Exactly 2 blocks (population AND intervention); MeSH [MeSH Terms], freetext [Title/Abstract].
+    When population has 0 or 1 term total, only the intervention block is included.
+    Otherwise: two blocks (population AND intervention); MeSH [MeSH Terms], freetext [Title/Abstract].
     Returns the query string only; temperature=0 for deterministic output.
     """
     api_key = _load_api_key()
     client = genai.Client(api_key=api_key)
-    prompt = f"""
+
+    total_pop = len(population_mesh) + len(population_freetext)
+    intervention_only = total_pop <= 1
+
+    if intervention_only:
+        prompt = f"""
+Format the following INTERVENTION terms into a PubMed boolean query.
+
+Rules:
+- Include EVERY term provided. Do not skip, remove, or filter any terms.
+- Return ONLY ONE block (intervention). Do NOT include a population block or AND.
+- Within the block connect all terms with OR
+- MeSH terms use [MeSH Terms] tag
+- Freetext terms use [Title/Abstract] tag
+- Wildcards are already in freetext terms, do not modify them
+- Do not add any new terms
+- Do not add NOT operators
+- Do not add study design filters
+- Return the query string only, no explanation, no markdown
+
+Intervention MeSH: {intervention_mesh}
+Intervention freetext: {intervention_freetext}
+
+Format (single block only):
+(
+  "term1"[MeSH Terms]
+  OR "term2"[Title/Abstract]
+)
+"""
+    else:
+        prompt = f"""
 Format the following terms into a PubMed boolean query.
 
 Rules:
@@ -936,8 +967,10 @@ def split_freetext_terms_by_pico(
         "- Do NOT put generic terms (e.g. surgery, treatment, patients) in either list — omit them.\n"
         "- Do NOT put outcome measures (e.g. insulin resistance, blood glucose, length of stay) in either list — omit them.\n"
         '- If a broad term has a more specific version that is relevant to this SR, put only the specific version in the appropriate list. For example: if the SR is about colorectal surgery, use "colorectal surgery" not "surgery". If the SR is about preoperative fasting, use "preoperative fasting" not "fasting". Always prefer the most specific form.\n'
+        "- Only include disease/condition terms that are the SAME disease as the SR's population or a direct subtype/synonym. Related diseases, comorbidities, or diseases that share risk factors are NOT population terms. For example, if the SR is about hypertension, do not include \"chronic kidney disease\", \"diabetes\", \"stroke\" — those are related but different diseases.\n"
         "- For each POPULATION term, apply this test: if you searched PubMed for ONLY this term, would most results be specifically about this SR's population? If the term could match papers about a completely different topic without additional context, omit it. For example, \"neglect\" alone matches elder neglect, self-neglect, neglected diseases — omit it. But \"child neglect\" specifically matches this SR's population — keep it.\n"
         "- For each INTERVENTION term, apply the same test: if you searched PubMed for ONLY this term, would most results be about this SR's intervention? If the term matches thousands of unrelated studies, omit it. For example, \"scale\" matches any measurement scale — omit it. But \"screening tool\" is specific enough — keep it.\n"
+        '- Do NOT include single-word terms that are common English words or generic medical terms (e.g. telephone, internet, exercise, walking, diet, smoking, writing, letter, list, practice, promote, diary). Only include single words if they are specific medical/scientific terms (e.g. nivolumab, maltodextrin, osimertinib, telerehabilitation).\n'
         "- Single generic words (e.g. \"abuse\", \"neglect\", \"injury\", \"trauma\", \"scale\", \"instrument\", \"fasting\", \"water\", \"placebo\") should almost always be omitted unless they are the exact name of the condition or intervention.\n\n"
         "PICO (context):\n"
         f"{pico_block}\n\n"
