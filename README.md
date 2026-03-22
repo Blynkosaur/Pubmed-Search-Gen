@@ -1,7 +1,7 @@
 ## Otto Take‑Home: Systematic Review Search Pipeline
 
-For Design Notes,
-Check out the docs folder,
+For design notes, see the **docs** folder (e.g. *Strategies for Otto Take Home.pdf*).  
+For **challenges and insights** from building the pipeline, see **[docs/SUBMISSION.md](SUBMISSION.md)**.
 
 This repo contains a prototype pipeline that reverse‑engineers a systematic review’s PICO and search strategy, builds a PubMed query, and evaluates recall of PubMed search result sets against the review’s own included studies.
 
